@@ -276,12 +276,7 @@ jobs:
                   root.addView(statusCard);
 
                   LinearLayout permissionCard = card();
-                  TextView permTitle = new TextView(this);
-                  permTitle.setText("权限自检");
-                  permTitle.setTextColor(0xFF1E2430);
-                  permTitle.setTextSize(20);
-                  permTitle.setPadding(0, dp(this, 4), 0, dp(this, 2));
-                  permissionCard.addView(permTitle);
+                  permissionCard.addView(section("权限自检"));
 
                   TextView permSub = new TextView(this);
                   permSub.setText("全部绿灯，应用消息才不会被系统拦掉");
@@ -1516,6 +1511,7 @@ jobs:
           import android.widget.*;
           import org.json.JSONArray;
           import org.json.JSONObject;
+          import java.io.File;
           import java.text.*;
           import java.util.*;
 
@@ -1611,7 +1607,10 @@ jobs:
               public static class AppPickerActivity extends Activity {
                   private LinearLayout listContainer;
                   private EditText search;
+                  private ScrollView appScroll;
+                  private LinearLayout indexBar;
                   private List<AppEntry> allApps = new ArrayList<>();
+                  private final Map<String, View> anchors = new HashMap<>();
                   private boolean receiverRegistered = false;
                   private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
                       @Override public void onReceive(Context context, Intent intent) { loadApps(); }
@@ -1620,33 +1619,36 @@ jobs:
                   static class AppEntry {
                       String pkg;
                       String label;
+                      String initial;
+                      long size;
                       Drawable icon;
                   }
 
                   @Override protected void onCreate(Bundle b) {
                       super.onCreate(b);
-                      ScrollView page = new ScrollView(this);
                       LinearLayout root = new LinearLayout(this);
                       root.setOrientation(LinearLayout.VERTICAL);
-                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
+                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 20));
                       root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
+
                       root.addView(text(this, "选择要监控的应用", 26, 0xFF1E2430));
                       TextView sub = text(this, "勾选后，这些应用的通知会在设定时间段响铃", 13, 0xFF6B7280);
-                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
+                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14));
+                      root.addView(sub);
 
                       search = new EditText(this);
                       search.setHint("搜索应用");
                       search.setSingleLine(true);
                       search.setTextSize(14);
-                      search.setPadding(dp(this, 12), 0, dp(this, 12), 0);
+                      search.setPadding(dp(this, 14), 0, dp(this, 14), 0);
                       GradientDrawable searchBg = new GradientDrawable();
                       searchBg.setColor(0xFFFFFFFF);
-                      searchBg.setCornerRadius(dp(this, 14));
+                      searchBg.setCornerRadius(dp(this, 15));
                       searchBg.setStroke(dp(this, 1), 0xFFE2E8F0);
                       search.setBackground(searchBg);
                       LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(
                               LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 46));
-                      searchParams.bottomMargin = dp(this, 12);
+                      searchParams.bottomMargin = dp(this, 10);
                       root.addView(search, searchParams);
                       search.addTextChangedListener(new android.text.TextWatcher() {
                           @Override public void afterTextChanged(android.text.Editable s) { renderList(); }
@@ -1654,16 +1656,33 @@ jobs:
                           @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
                       });
 
+                      FrameLayout listFrame = new FrameLayout(this);
+                      LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+                      root.addView(listFrame, frameParams);
+
+                      appScroll = new ScrollView(this);
                       listContainer = new LinearLayout(this);
                       listContainer.setOrientation(LinearLayout.VERTICAL);
-                      root.addView(listContainer);
+                      listContainer.setPadding(0, 0, dp(this, 26), 0);
+                      appScroll.addView(listContainer);
+                      listFrame.addView(appScroll, new FrameLayout.LayoutParams(
+                              FrameLayout.LayoutParams.MATCH_PARENT,
+                              FrameLayout.LayoutParams.MATCH_PARENT));
+
+                      indexBar = new LinearLayout(this);
+                      indexBar.setOrientation(LinearLayout.VERTICAL);
+                      indexBar.setGravity(Gravity.CENTER_VERTICAL);
+                      FrameLayout.LayoutParams indexParams = new FrameLayout.LayoutParams(
+                              dp(this, 24), FrameLayout.LayoutParams.MATCH_PARENT);
+                      indexParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
+                      listFrame.addView(indexBar, indexParams);
+                      buildIndexBar();
 
                       Button done = button(this, "完成", true);
                       done.setOnClickListener(v -> finish());
                       root.addView(done, params(this, true));
-                      page.addView(root);
-                      setContentView(page);
-                      loadApps();
+                      setContentView(root);
                   }
 
                   @Override protected void onResume() {
@@ -1690,6 +1709,28 @@ jobs:
                       super.onPause();
                   }
 
+                  private void buildIndexBar() {
+                      indexBar.removeAllViews();
+                      String letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+                      for (int i = 0; i < letters.length(); i++) {
+                          final String letter = String.valueOf(letters.charAt(i));
+                          TextView tv = text(this, letter, 9, 0xFF6B7280);
+                          tv.setGravity(Gravity.CENTER);
+                          tv.setClickable(true);
+                          tv.setOnClickListener(v -> jumpTo(letter));
+                          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                                  LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+                          indexBar.addView(tv, lp);
+                      }
+                  }
+
+                  private void jumpTo(String letter) {
+                      final View target = anchors.get(letter);
+                      if (target != null) {
+                          appScroll.post(() -> appScroll.smoothScrollTo(0, target.getTop()));
+                      }
+                  }
+
                   private void loadApps() {
                       PackageManager pm = getPackageManager();
                       Intent intent = new Intent(Intent.ACTION_MAIN, null);
@@ -1705,31 +1746,114 @@ jobs:
                           e.pkg = pkg;
                           e.label = ri.loadLabel(pm).toString();
                           e.icon = ri.loadIcon(pm);
+                          e.initial = initialOf(e.label);
+                          try {
+                              e.size = new File(ri.activityInfo.applicationInfo.sourceDir).length();
+                          } catch (Exception ignored) {
+                              e.size = 0;
+                          }
                           apps.add(e);
                       }
                       final Collator collator = Collator.getInstance(Locale.CHINA);
-                      Collections.sort(apps, (a, b) -> collator.compare(a.label, b.label));
+                      Collections.sort(apps, (a, b) -> {
+                          int ia = indexOf(a.initial);
+                          int ib = indexOf(b.initial);
+                          if (ia != ib) return ia - ib;
+                          return collator.compare(a.label, b.label);
+                      });
                       allApps = apps;
                       renderList();
+                  }
+
+                  private int indexOf(String initial) {
+                      if (initial == null || initial.isEmpty()) return 26;
+                      char c = initial.charAt(0);
+                      if (c >= 'A' && c <= 'Z') return c - 'A';
+                      return 26;
+                  }
+
+                  private String initialOf(String label) {
+                      if (label == null || label.isEmpty()) return "#";
+                      char c = label.charAt(0);
+                      if (c >= 'A' && c <= 'Z') return String.valueOf(c);
+                      if (c >= 'a' && c <= 'z') return String.valueOf(Character.toUpperCase(c));
+                      if (Character.isDigit(c)) return "#";
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          try {
+                              android.icu.text.Transliterator t =
+                                      android.icu.text.Transliterator.getInstance("Han-Latin");
+                              String latin = t.transliterate(String.valueOf(c));
+                              latin = Normalizer.normalize(latin, Normalizer.Form.NFD).replaceAll("\\p{M}", "");
+                              if (!latin.isEmpty()) {
+                                  char l = Character.toUpperCase(latin.charAt(0));
+                                  if (l >= 'A' && l <= 'Z') return String.valueOf(l);
+                              }
+                          } catch (Exception ignored) {
+                          }
+                      }
+                      return "#";
+                  }
+
+                  private String formatSize(long bytes) {
+                      if (bytes <= 0) return "未知大小";
+                      if (bytes >= 1024L * 1024 * 1024) {
+                          return String.format(Locale.CHINA, "%.2f GB", bytes / 1073741824.0);
+                      }
+                      if (bytes >= 1024L * 1024) {
+                          return String.format(Locale.CHINA, "%.1f MB", bytes / 1048576.0);
+                      }
+                      return String.format(Locale.CHINA, "%.0f KB", bytes / 1024.0);
                   }
 
                   private void renderList() {
                       if (listContainer == null) return;
                       listContainer.removeAllViews();
+                      anchors.clear();
                       String q = search.getText().toString().trim().toLowerCase(Locale.CHINA);
                       int shown = 0;
                       for (AppEntry app : allApps) {
                           if (!q.isEmpty() && !app.label.toLowerCase(Locale.CHINA).contains(q)) continue;
+
+                          LinearLayout row = new LinearLayout(this);
+                          row.setOrientation(LinearLayout.HORIZONTAL);
+                          row.setGravity(Gravity.CENTER_VERTICAL);
+                          row.setMinimumHeight(dp(this, 64));
+                          row.setPadding(0, dp(this, 8), dp(this, 4), dp(this, 8));
+
+                          ImageView icon = new ImageView(this);
+                          icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                          row.addView(icon, new LinearLayout.LayoutParams(dp(this, 44), dp(this, 44)));
+                          icon.setImageDrawable(app.icon);
+
+                          LinearLayout textBox = new LinearLayout(this);
+                          textBox.setOrientation(LinearLayout.VERTICAL);
+                          LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(
+                                  0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+                          textParams.leftMargin = dp(this, 12);
+                          row.addView(textBox, textParams);
+
+                          TextView name = text(this, app.label, 15, 0xFF1F2937);
+                          textBox.addView(name);
+                          TextView size = text(this, formatSize(app.size), 12, 0xFF9CA3AF);
+                          size.setPadding(0, dp(this, 2), 0, 0);
+                          textBox.addView(size);
+
                           CheckBox box = new CheckBox(this);
-                          box.setText(app.label);
-                          box.setTextSize(14);
-                          box.setTextColor(0xFF1F2937);
                           box.setChecked(MonitoredAppsStore.isSelected(this, app.pkg));
-                          box.setCompoundDrawablesWithIntrinsicBounds(app.icon, null, null, null);
-                          box.setCompoundDrawablePadding(dp(this, 12));
-                          box.setPadding(0, dp(this, 8), 0, dp(this, 8));
-                          box.setOnCheckedChangeListener((v, checked) -> MonitoredAppsStore.setSelected(this, app.pkg, checked));
-                          listContainer.addView(box);
+                          row.addView(box, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 48)));
+                          row.setOnClickListener(v -> box.setChecked(!box.isChecked()));
+                          box.setOnCheckedChangeListener((v, checked) ->
+                                  MonitoredAppsStore.setSelected(this, app.pkg, checked));
+
+                          if (!anchors.containsKey(app.initial)) {
+                              anchors.put(app.initial, row);
+                          }
+                          listContainer.addView(row);
+
+                          View divider = new View(this);
+                          divider.setBackgroundColor(0xFFEDF0F4);
+                          listContainer.addView(divider, new LinearLayout.LayoutParams(
+                                  LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 1)));
                           shown++;
                       }
                       if (shown == 0) {
