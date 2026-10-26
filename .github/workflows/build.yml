@@ -189,7 +189,6 @@ jobs:
 
           public class MainActivity extends Activity {
 
-              private TextView status;
               private LinearLayout scheduleList;
               private LinearLayout permissionContainer;
               private Spinner ringtoneSpinner;
@@ -238,17 +237,11 @@ jobs:
                   root.addView(subtitle);
 
                   LinearLayout statusCard = card();
-                  status = new TextView(this);
-                  status.setTextColor(0xFF4B5563);
-                  status.setTextSize(13);
-                  status.setLineSpacing(0, 1.35f);
-                  statusCard.addView(status);
-
                   enableBox = new CheckBox(this);
                   enableBox.setText("启用飞书响铃");
                   enableBox.setTextColor(0xFF1E2430);
                   enableBox.setTextSize(16);
-                  enableBox.setPadding(0, dp(this, 10), 0, 0);
+                  enableBox.setPadding(0, dp(this, 4), 0, 0);
                   enableBox.setChecked(ScheduleStore.isEnabled(this));
                   enableBox.setOnCheckedChangeListener((v, checked) -> {
                       ScheduleStore.setEnabled(this, checked);
@@ -261,25 +254,34 @@ jobs:
                       }
                   });
                   statusCard.addView(enableBox);
+
+                  TextView statusHint = new TextView(this);
+                  statusHint.setText("开启后，只在下方时间段内响铃");
+                  statusHint.setTextColor(0xFF6B7280);
+                  statusHint.setTextSize(12);
+                  statusHint.setPadding(0, dp(this, 4), 0, 0);
+                  statusCard.addView(statusHint);
                   root.addView(statusCard);
 
+                  LinearLayout permissionCard = card();
                   TextView permTitle = new TextView(this);
                   permTitle.setText("权限自检");
                   permTitle.setTextColor(0xFF1E2430);
                   permTitle.setTextSize(20);
-                  permTitle.setPadding(0, dp(this, 8), 0, dp(this, 2));
-                  root.addView(permTitle);
+                  permTitle.setPadding(0, dp(this, 4), 0, dp(this, 2));
+                  permissionCard.addView(permTitle);
 
                   TextView permSub = new TextView(this);
                   permSub.setText("全部绿灯，飞书消息才不会被系统拦掉");
                   permSub.setTextColor(0xFF6B7280);
                   permSub.setTextSize(13);
-                  permSub.setPadding(0, 0, 0, dp(this, 10));
-                  root.addView(permSub);
+                  permSub.setPadding(0, 0, 0, dp(this, 4));
+                  permissionCard.addView(permSub);
 
                   permissionContainer = new LinearLayout(this);
                   permissionContainer.setOrientation(LinearLayout.VERTICAL);
-                  root.addView(permissionContainer);
+                  permissionCard.addView(permissionContainer);
+                  root.addView(permissionCard);
 
                   LinearLayout ringCard = card();
                   ringCard.addView(section("铃声"));
@@ -527,7 +529,18 @@ jobs:
 
               private void addPermissionRow(String title, String desc, boolean ok,
                                             String action, View.OnClickListener listener, String override) {
-                  LinearLayout row = card();
+                  if (permissionContainer.getChildCount() > 0) {
+                      View divider = new View(this);
+                      divider.setBackgroundColor(0xFFE5E7EB);
+                      LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 1));
+                      permissionContainer.addView(divider, dlp);
+                  }
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.VERTICAL);
+                  row.setPadding(0, dp(this, 12), 0, dp(this, 12));
+
                   LinearLayout head = new LinearLayout(this);
                   head.setOrientation(LinearLayout.HORIZONTAL);
                   head.setGravity(Gravity.CENTER_VERTICAL);
@@ -731,35 +744,6 @@ jobs:
                   }
               }
 
-              private void updateStatus() {
-                  String notification = hasNotificationAccess() ? "已开启" : "未开启";
-                  String battery = isIgnoringBattery() ? "已忽略" : "未忽略";
-                  String dnd = isDndAllowed() ? "已授权" : "未授权";
-                  String fullScreen;
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                      fullScreen = nm.canUseFullScreenIntent() ? "已允许" : "未允许";
-                  } else {
-                      fullScreen = "系统版本无需设置";
-                  }
-                  status.setText("通知使用权：" + notification
-                          + "\n全屏通知：" + fullScreen
-                          + "\n电池优化：" + battery
-                          + "\n勿扰权限：" + dnd);
-              }
-
-              private boolean hasNotificationAccess() {
-                  return Extras.FeishuListener.hasAccess(this);
-              }
-
-              private boolean isIgnoringBattery() {
-                  return Extras.ignoringBattery(this);
-              }
-
-              private boolean isDndAllowed() {
-                  return Extras.dndAllowed(this);
-              }
-
               private void requestNotificationPermission() {
                   if (Build.VERSION.SDK_INT >= 33 &&
                           checkSelfPermission("android.permission.POST_NOTIFICATIONS")
@@ -777,7 +761,6 @@ jobs:
               @Override
               protected void onResume() {
                   super.onResume();
-                  updateStatus();
                   renderPermissionChecks();
                   if (ScheduleStore.isEnabled(this)) {
                       AlarmService.startGuard(this);
