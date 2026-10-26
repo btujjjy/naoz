@@ -532,7 +532,8 @@ jobs:
                               dp(this, 44), dp(this, 44)));
                       icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
                       try {
-                          icon.setImageDrawable(pm.getApplicationIcon(entry[1]));
+                          icon.setImageDrawable(Extras.circularIcon(this,
+                                  pm.getApplicationIcon(entry[1]), 44));
                       } catch (Exception ignored) {
                       }
                       item.addView(icon);
@@ -1556,7 +1557,13 @@ jobs:
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.content.res.ColorStateList;
+          import android.graphics.Bitmap;
+          import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.Paint;
+          import android.graphics.Path;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.BitmapDrawable;
           import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.RippleDrawable;
@@ -1565,6 +1572,7 @@ jobs:
           import android.provider.Settings;
           import android.service.notification.StatusBarNotification;
           import android.view.Gravity;
+          import android.view.MotionEvent;
           import android.view.View;
           import android.widget.*;
           import org.json.JSONArray;
@@ -1627,6 +1635,23 @@ jobs:
                   return Build.VERSION.SDK_INT < 33 || c.checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
               }
 
+              static Drawable circularIcon(Context c, Drawable d, int sizeDp) {
+                  int size = dp(c, sizeDp);
+                  Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                  Canvas canvas = new Canvas(bmp);
+                  Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  paint.setColor(Color.WHITE);
+                  canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint);
+                  Path clip = new Path();
+                  clip.addCircle(size / 2f, size / 2f, size / 2f, Path.Direction.CW);
+                  canvas.clipPath(clip);
+                  if (d != null) {
+                      d.setBounds(0, 0, size, size);
+                      d.draw(canvas);
+                  }
+                  return new BitmapDrawable(c.getResources(), bmp);
+              }
+
               public static class MonitoredAppsStore {
                   private static final String KEY = "monitored_apps";
                   static SharedPreferences prefs(Context c) { return MainActivity.ScheduleStore.prefs(c); }
@@ -1639,34 +1664,15 @@ jobs:
                       if (selected) set.add(pkg); else set.remove(pkg);
                       prefs(c).edit().putStringSet(KEY, set).apply();
                   }
-                  public static String summary(Context c) {
-                      Set<String> set = get(c);
-                      if (set.isEmpty()) return "还没有选择应用，点下面按钮去勾选";
-                      PackageManager pm = c.getPackageManager();
-                      List<String> names = new ArrayList<>();
-                      for (String pkg : set) {
-                          try {
-                              names.add(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString());
-                          } catch (Exception ignored) {}
-                      }
-                      if (names.isEmpty()) return "已选应用已卸载，请重新选择";
-                      Collections.sort(names, Collator.getInstance(Locale.CHINA));
-                      StringBuilder sb = new StringBuilder("已选 " + names.size() + " 个：");
-                      int max = Math.min(names.size(), 4);
-                      for (int i = 0; i < max; i++) {
-                          if (i > 0) sb.append("、");
-                          sb.append(names.get(i));
-                      }
-                      if (names.size() > max) sb.append(" 等");
-                      return sb.toString();
-                  }
               }
 
               public static class AppPickerActivity extends Activity {
                   private LinearLayout listContainer;
                   private EditText search;
                   private ScrollView appScroll;
-                  private LinearLayout indexBar;
+                  private FrameLayout listFrame;
+                  private IndexBar indexBar;
+                  private TextView letterBubble;
                   private List<AppEntry> allApps = new ArrayList<>();
                   private final Map<String, View> anchors = new HashMap<>();
                   private boolean receiverRegistered = false;
@@ -1680,6 +1686,74 @@ jobs:
                       String initial;
                       long size;
                       Drawable icon;
+                  }
+
+                  static class IndexBar extends View {
+                      interface Listener {
+                          void onLetter(String letter, float y);
+                          void onRelease();
+                      }
+                      private static final String LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+                      private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                      private Listener listener;
+                      private int current = -1;
+
+                      IndexBar(Context c) {
+                          super(c);
+                          paint.setTextAlign(Paint.Align.CENTER);
+                          paint.setTextSize(dp(c, 9));
+                      }
+
+                      void setListener(Listener l) { listener = l; }
+
+                      @Override protected void onDraw(Canvas canvas) {
+                          super.onDraw(canvas);
+                          int h = getHeight();
+                          if (h <= 0) return;
+                          for (int i = 0; i < LETTERS.length(); i++) {
+                              paint.setColor(i == current ? 0xFF2563EB : 0xFF6B7280);
+                              paint.setTypeface(i == current ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+                              float centerY = h * (i + 0.5f) / LETTERS.length();
+                              Paint.FontMetrics fm = paint.getFontMetrics();
+                              float baseline = centerY - (fm.ascent + fm.descent) / 2f;
+                              canvas.drawText(String.valueOf(LETTERS.charAt(i)),
+                                      getWidth() / 2f, baseline, paint);
+                          }
+                      }
+
+                      @Override public boolean onTouchEvent(MotionEvent event) {
+                          switch (event.getActionMasked()) {
+                              case MotionEvent.ACTION_DOWN:
+                                  getParent().requestDisallowInterceptTouchEvent(true);
+                                  handle(event.getY());
+                                  return true;
+                              case MotionEvent.ACTION_MOVE:
+                                  handle(event.getY());
+                                  return true;
+                              case MotionEvent.ACTION_UP:
+                              case MotionEvent.ACTION_CANCEL:
+                                  getParent().requestDisallowInterceptTouchEvent(false);
+                                  current = -1;
+                                  invalidate();
+                                  if (listener != null) listener.onRelease();
+                                  return true;
+                          }
+                          return super.onTouchEvent(event);
+                      }
+
+                      private void handle(float y) {
+                          if (getHeight() <= 0) return;
+                          int idx = (int) (y / getHeight() * LETTERS.length());
+                          if (idx < 0) idx = 0;
+                          if (idx >= LETTERS.length()) idx = LETTERS.length() - 1;
+                          if (idx != current) {
+                              current = idx;
+                              invalidate();
+                          }
+                          if (listener != null) {
+                              listener.onLetter(String.valueOf(LETTERS.charAt(idx)), y);
+                          }
+                      }
                   }
 
                   @Override protected void onCreate(Bundle b) {
@@ -1714,7 +1788,7 @@ jobs:
                           @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
                       });
 
-                      FrameLayout listFrame = new FrameLayout(this);
+                      listFrame = new FrameLayout(this);
                       LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(
                               LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
                       root.addView(listFrame, frameParams);
@@ -1728,14 +1802,34 @@ jobs:
                               FrameLayout.LayoutParams.MATCH_PARENT,
                               FrameLayout.LayoutParams.MATCH_PARENT));
 
-                      indexBar = new LinearLayout(this);
-                      indexBar.setOrientation(LinearLayout.VERTICAL);
-                      indexBar.setGravity(Gravity.CENTER_VERTICAL);
+                      indexBar = new IndexBar(this);
                       FrameLayout.LayoutParams indexParams = new FrameLayout.LayoutParams(
-                              dp(this, 24), FrameLayout.LayoutParams.MATCH_PARENT);
+                              dp(this, 26), FrameLayout.LayoutParams.MATCH_PARENT);
                       indexParams.gravity = Gravity.END | Gravity.CENTER_VERTICAL;
                       listFrame.addView(indexBar, indexParams);
-                      buildIndexBar();
+                      indexBar.setListener(new IndexBar.Listener() {
+                          @Override public void onLetter(String letter, float y) {
+                              showBubble(letter, y);
+                              jumpTo(letter);
+                          }
+                          @Override public void onRelease() { hideBubble(); }
+                      });
+
+                      letterBubble = new TextView(this);
+                      letterBubble.setTextSize(26);
+                      letterBubble.setTextColor(Color.WHITE);
+                      letterBubble.setTypeface(Typeface.DEFAULT_BOLD);
+                      letterBubble.setGravity(Gravity.CENTER);
+                      GradientDrawable bubbleBg = new GradientDrawable();
+                      bubbleBg.setShape(GradientDrawable.OVAL);
+                      bubbleBg.setColor(0xFFFFC107);
+                      letterBubble.setBackground(bubbleBg);
+                      letterBubble.setVisibility(View.GONE);
+                      FrameLayout.LayoutParams bubbleParams = new FrameLayout.LayoutParams(
+                              dp(this, 56), dp(this, 56));
+                      bubbleParams.gravity = Gravity.END | Gravity.TOP;
+                      bubbleParams.rightMargin = dp(this, 36);
+                      listFrame.addView(letterBubble, bubbleParams);
 
                       Button done = button(this, "完成", true);
                       done.setOnClickListener(v -> finish());
@@ -1767,25 +1861,30 @@ jobs:
                       super.onPause();
                   }
 
-                  private void buildIndexBar() {
-                      indexBar.removeAllViews();
-                      String letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
-                      for (int i = 0; i < letters.length(); i++) {
-                          final String letter = String.valueOf(letters.charAt(i));
-                          TextView tv = text(this, letter, 9, 0xFF6B7280);
-                          tv.setGravity(Gravity.CENTER);
-                          tv.setClickable(true);
-                          tv.setOnClickListener(v -> jumpTo(letter));
-                          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                                  LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
-                          indexBar.addView(tv, lp);
-                      }
+                  private void showBubble(String letter, float y) {
+                      if (letterBubble == null) return;
+                      letterBubble.animate().cancel();
+                      letterBubble.setAlpha(1f);
+                      letterBubble.setVisibility(View.VISIBLE);
+                      letterBubble.setText(letter);
+                      int size = dp(this, 56);
+                      float top = y - size / 2f;
+                      int maxTop = Math.max(0, listFrame.getHeight() - size);
+                      if (top < 0) top = 0;
+                      if (top > maxTop) top = maxTop;
+                      letterBubble.setTranslationY(top);
+                  }
+
+                  private void hideBubble() {
+                      if (letterBubble == null) return;
+                      letterBubble.animate().alpha(0f).setDuration(150)
+                              .withEndAction(() -> letterBubble.setVisibility(View.GONE)).start();
                   }
 
                   private void jumpTo(String letter) {
                       final View target = anchors.get(letter);
                       if (target != null) {
-                          appScroll.post(() -> appScroll.smoothScrollTo(0, target.getTop()));
+                          appScroll.scrollTo(0, target.getTop());
                       }
                   }
 
@@ -1803,7 +1902,7 @@ jobs:
                           AppEntry e = new AppEntry();
                           e.pkg = pkg;
                           e.label = ri.loadLabel(pm).toString();
-                          e.icon = ri.loadIcon(pm);
+                          e.icon = circularIcon(this, ri.loadIcon(pm), 44);
                           e.initial = initialOf(e.label);
                           try {
                               e.size = new File(ri.activityInfo.applicationInfo.sourceDir).length();
