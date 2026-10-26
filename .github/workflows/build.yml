@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -17,59 +19,52 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Create project files
+      - name: Restore project from previous build
         run: |
-          mkdir -p app/src/main/java/com/example/feishualarm
+          python3 - <<'PY'
+          import subprocess, sys
+          path = '.github/workflows/build.yml'
+          commits = subprocess.check_output(['git', 'log', '--format=%H', '--', path]).decode().split()
+          for sha in commits[1:]:
+              try:
+                  content = subprocess.check_output(['git', 'show', f'{sha}:{path}']).decode('utf-8')
+                  lines = content.splitlines()
+                  start = None
+                  for i, line in enumerate(lines):
+                      if line.strip() == '- name: Create project files':
+                          start = i
+                          break
+                  if start is None:
+                      continue
+                  run_at = None
+                  for i in range(start, len(lines)):
+                      if lines[i].strip() == 'run: |':
+                          run_at = i
+                          break
+                  if run_at is None:
+                      continue
+                  script_lines = []
+                  for line in lines[run_at + 1:]:
+                      if line.strip() == '':
+                          script_lines.append('')
+                      elif line.startswith('          '):
+                          script_lines.append(line[10:])
+                      else:
+                          break
+                  script = '\n'.join(script_lines)
+                  subprocess.run(script, shell=True, executable='/bin/bash', check=True)
+                  print('Restored project files from ' + sha)
+                  sys.exit(0)
+              except SystemExit:
+                  raise
+              except Exception as exc:
+                  print('skip ' + sha + ': ' + str(exc))
+          print('ERROR: previous build.yml with Create project files not found')
+          sys.exit(1)
+          PY
 
-          cat > settings.gradle <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "FeishuAlarm"
-          include ':app'
-          EOF
-
-          cat > build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application' version '8.5.2' apply false
-          }
-          EOF
-
-          cat > gradle.properties <<'EOF'
-          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-          android.builder.sdkDownload=true
-          EOF
-
-          cat > app/build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application'
-          }
-
-          android {
-              namespace 'com.example.feishualarm'
-              compileSdk 34
-
-              defaultConfig {
-                  applicationId "com.example.feishualarm"
-                  minSdk 27
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-          }
-          EOF
-
+      - name: Overwrite manifest
+        run: |
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -82,6 +77,7 @@ jobs:
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
               <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
               <application
                   android:allowBackup="true"
@@ -105,6 +101,16 @@ jobs:
                       android:showWhenLocked="true"
                       android:turnScreenOn="true" />
 
+                  <activity
+                      android:name=".Extras$PermissionCheckActivity"
+                      android:exported="false" />
+                  <activity
+                      android:name=".Extras$TriggerLogActivity"
+                      android:exported="false" />
+                  <activity
+                      android:name=".Extras$ShiftPatternActivity"
+                      android:exported="false" />
+
                   <service
                       android:name=".MainActivity$AlarmService"
                       android:exported="false"
@@ -122,1243 +128,643 @@ jobs:
                           <action android:name="android.service.notification.NotificationListenerService" />
                       </intent-filter>
                   </service>
+
+                  <receiver
+                      android:name=".Extras$BootReceiver"
+                      android:exported="true"
+                      android:enabled="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                          <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                      </intent-filter>
+                  </receiver>
+
+                  <receiver
+                      android:name=".Extras$WatchdogReceiver"
+                      android:exported="false" />
               </application>
           </manifest>
           EOF
 
-          cat > app/src/main/java/com/example/feishualarm/MainActivity.java <<'EOF'
+      - name: Create Extras.java
+        run: |
+          cat > app/src/main/java/com/example/feishualarm/Extras.java <<'EOF'
           package com.example.feishualarm;
 
-          import android.app.Activity;
-          import android.app.AlertDialog;
-          import android.app.KeyguardManager;
-          import android.app.Notification;
-          import android.app.NotificationChannel;
-          import android.app.NotificationManager;
-          import android.app.PendingIntent;
-          import android.app.Service;
-          import android.content.Context;
-          import android.content.Intent;
-          import android.content.SharedPreferences;
+          import android.app.*;
+          import android.content.*;
           import android.content.pm.PackageManager;
           import android.content.res.ColorStateList;
-          import android.database.Cursor;
           import android.graphics.Color;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.RippleDrawable;
-          import android.media.AudioAttributes;
-          import android.media.AudioManager;
-          import android.media.MediaPlayer;
-          import android.media.Ringtone;
-          import android.media.RingtoneManager;
           import android.net.Uri;
-          import android.os.Build;
-          import android.os.Bundle;
-          import android.os.Handler;
-          import android.os.IBinder;
-          import android.os.Looper;
-          import android.os.PowerManager;
-          import android.os.VibrationEffect;
-          import android.os.Vibrator;
+          import android.os.*;
           import android.provider.Settings;
           import android.view.Gravity;
-          import android.view.HapticFeedbackConstants;
-          import android.view.KeyEvent;
-          import android.view.MotionEvent;
           import android.view.View;
-          import android.view.WindowManager;
-          import android.widget.AdapterView;
-          import android.widget.ArrayAdapter;
-          import android.widget.Button;
-          import android.widget.CheckBox;
-          import android.widget.LinearLayout;
-          import android.widget.NumberPicker;
-          import android.widget.ScrollView;
-          import android.widget.Spinner;
-          import android.widget.TextView;
-          import android.widget.Toast;
+          import android.widget.*;
           import org.json.JSONArray;
           import org.json.JSONObject;
-          import java.io.File;
-          import java.io.FileOutputStream;
-          import java.io.InputStream;
-          import java.io.OutputStream;
-          import java.util.ArrayList;
-          import java.util.Calendar;
-          import java.util.List;
+          import java.text.SimpleDateFormat;
+          import java.util.*;
 
-          public class MainActivity extends Activity {
+          public class Extras {
+              static int dp(Context c, int v) { return MainActivity.dp(c, v); }
 
-              private TextView status;
-              private LinearLayout scheduleList;
-              private Spinner ringtoneSpinner;
-              private List<RingtoneHelper.Option> builtIn;
-              private TextView customLabel;
-              private CheckBox enableBox;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-                  getWindow().setStatusBarColor(0xFFF9FBFF);
-                  getWindow().setNavigationBarColor(0xFFF5F7FC);
-                  getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                                  | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-
-                  builtIn = RingtoneHelper.getBuiltIn(this);
-                  buildUi();
-                  requestNotificationPermission();
+              static TextView text(Context c, String s, int size, int color) {
+                  TextView v = new TextView(c); v.setText(s); v.setTextSize(size); v.setTextColor(color); return v;
               }
 
-              private void buildUi() {
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
-                  root.setBackground(new GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR,
-                          new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
-                  scroll.addView(root);
+              static LinearLayout card(Context c) {
+                  LinearLayout v = new LinearLayout(c);
+                  v.setOrientation(LinearLayout.VERTICAL);
+                  v.setPadding(dp(c, 18), dp(c, 16), dp(c, 18), dp(c, 16));
+                  GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xE6FFFFFF, 0xCCFFFFFF});
+                  bg.setCornerRadius(dp(c, 24)); bg.setStroke(dp(c, 1), 0x99FFFFFF);
+                  v.setBackground(bg); v.setElevation(0);
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  p.bottomMargin = dp(c, 14); v.setLayoutParams(p);
+                  return v;
+              }
 
-                  TextView title = new TextView(this);
-                  title.setText("飞书夜班铃声");
-                  title.setTextColor(0xFF1E2430);
-                  title.setTextSize(28);
-                  title.setGravity(Gravity.START);
-                  root.addView(title);
+              static Button button(Context c, String s, boolean primary) {
+                  Button b = new Button(c);
+                  b.setText(s); b.setAllCaps(false); b.setTextSize(primary ? 15 : 14);
+                  b.setTextColor(primary ? Color.WHITE : 0xFF1F2937);
+                  b.setStateListAnimator(null); b.setElevation(0f);
+                  GradientDrawable bg = new GradientDrawable(); bg.setColor(primary ? 0xFF2563EB : 0xFFF3F6FB); bg.setCornerRadius(dp(c, 14));
+                  if (!primary) bg.setStroke(dp(c, 1), 0xFFE2E8F0);
+                  b.setBackground(new RippleDrawable(ColorStateList.valueOf(primary ? 0x40FFFFFF : 0x332563EB), bg, bg));
+                  MainActivity.applyPressFeedback(b);
+                  return b;
+              }
 
-                  TextView subtitle = new TextView(this);
-                  subtitle.setText("夜班消息提醒 · 只在设定时间响铃");
-                  subtitle.setTextColor(0xFF6B7280);
-                  subtitle.setTextSize(13);
-                  subtitle.setPadding(0, dp(this, 4), 0, dp(this, 16));
-                  root.addView(subtitle);
+              static LinearLayout.LayoutParams params(Context c, boolean primary) {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(c, primary ? 50 : 46));
+                  p.topMargin = dp(c, 8); return p;
+              }
 
-                  LinearLayout statusCard = card();
-                  status = new TextView(this);
-                  status.setTextColor(0xFF4B5563);
-                  status.setTextSize(13);
-                  status.setLineSpacing(0, 1.35f);
-                  statusCard.addView(status);
+              public static class BootReceiver extends BroadcastReceiver {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!MainActivity.ScheduleStore.isEnabled(context)) return;
+                      try { MainActivity.AlarmService.startGuard(context); } catch (Exception ignored) {}
+                      MainActivity.AlarmService.scheduleWatchdog(context);
+                  }
+              }
 
-                  enableBox = new CheckBox(this);
-                  enableBox.setText("启用飞书响铃");
-                  enableBox.setTextColor(0xFF1E2430);
-                  enableBox.setTextSize(16);
-                  enableBox.setPadding(0, dp(this, 10), 0, 0);
-                  enableBox.setChecked(ScheduleStore.isEnabled(this));
-                  enableBox.setOnCheckedChangeListener((v, checked) -> {
-                      ScheduleStore.setEnabled(this, checked);
-                      if (checked) {
-                          AlarmService.startGuard(this);
-                      } else {
-                          AlarmService.stopGuard(this);
+              public static class WatchdogReceiver extends BroadcastReceiver {
+                  @Override public void onReceive(Context context, Intent intent) {
+                      if (!MainActivity.ScheduleStore.isEnabled(context)) return;
+                      MainActivity.AlarmService.scheduleWatchdog(context);
+                      if (!MainActivity.FeishuNotificationListener.hasAccess(context)) {
+                          notify(context, "通知使用权被关闭了，飞书消息不会再响铃。点此去开启。");
+                          return;
                       }
-                  });
-                  statusCard.addView(enableBox);
-                  root.addView(statusCard);
+                      if (!MainActivity.FeishuNotificationListener.connected) {
+                          MainActivity.FeishuNotificationListener.rebind(context);
+                      }
+                      if (!MainActivity.AlarmService.guardRunning) {
+                          try { MainActivity.AlarmService.startGuard(context); } catch (Exception ignored) {}
+                      }
+                  }
+                  private void notify(Context context, String msg) {
+                      try {
+                          NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                          nm.createNotificationChannel(new NotificationChannel("feishu_watchdog", "监控异常提醒", NotificationManager.IMPORTANCE_DEFAULT));
+                          Intent open = new Intent(context, MainActivity.class);
+                          PendingIntent pi = PendingIntent.getActivity(context, 12, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                          Notification n = new Notification.Builder(context, "feishu_watchdog")
+                                  .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                                  .setContentTitle("飞书监控异常")
+                                  .setContentText(msg)
+                                  .setStyle(new Notification.BigTextStyle().bigText(msg))
+                                  .setContentIntent(pi).setAutoCancel(true).build();
+                          nm.notify(3, n);
+                      } catch (Exception ignored) {}
+                  }
+              }
 
-                  LinearLayout permissionCard = card();
-                  permissionCard.addView(section("权限"));
-                  permissionCard.addView(secondaryButton("通知使用权", v ->
-                          startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      permissionCard.addView(secondaryButton("全屏通知权限", v -> {
+              public static class TriggerLogStore {
+                  private static final String KEY = "trigger_logs";
+                  public static class Entry { public long time; public String title; public String text; public String result; }
+                  static SharedPreferences prefs(Context c) { return MainActivity.ScheduleStore.prefs(c); }
+                  public static void log(Context c, String title, String text, String result) {
+                      List<Entry> list = getLogs(c);
+                      Entry e = new Entry(); e.time = System.currentTimeMillis();
+                      e.title = title == null ? "" : title; e.text = text == null ? "" : text; e.result = result;
+                      list.add(0, e);
+                      while (list.size() > 50) list.remove(list.size() - 1);
+                      JSONArray arr = new JSONArray();
+                      for (Entry x : list) {
                           try {
-                              startActivity(new Intent(
-                                      Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                                      Uri.parse("package:" + getPackageName())));
-                          } catch (Exception e) {
-                              toast("请到系统设置里允许全屏通知");
-                          }
-                      }));
+                              JSONObject o = new JSONObject();
+                              o.put("time", x.time); o.put("title", x.title); o.put("text", x.text); o.put("result", x.result);
+                              arr.put(o);
+                          } catch (Exception ignored) {}
+                      }
+                      prefs(c).edit().putString(KEY, arr.toString()).apply();
                   }
-                  permissionCard.addView(secondaryButton("电池优化白名单", v -> {
+                  public static List<Entry> getLogs(Context c) {
+                      List<Entry> list = new ArrayList<>();
                       try {
-                          startActivity(new Intent(
-                                  Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                  Uri.parse("package:" + getPackageName())));
-                      } catch (Exception e) {
-                          toast("请到系统设置里关闭电池优化");
-                      }
-                  }));
-                  permissionCard.addView(secondaryButton("勿扰访问权限", v ->
-                          startActivity(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))));
-                  root.addView(permissionCard);
-
-                  LinearLayout ringCard = card();
-                  ringCard.addView(section("铃声"));
-                  ringtoneSpinner = new Spinner(this);
-                  ArrayAdapter<String> adapter = new ArrayAdapter<>(
-                          this, android.R.layout.simple_spinner_item);
-                  for (RingtoneHelper.Option option : builtIn) {
-                      adapter.add(option.title);
-                  }
-                  adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-                  ringtoneSpinner.setAdapter(adapter);
-
-                  String saved = ScheduleStore.prefs(this).getString(ScheduleStore.KEY_RINGTONE, "");
-                  int selected = 0;
-                  for (int i = 0; i < builtIn.size(); i++) {
-                      if (("builtin:" + builtIn.get(i).uri).equals(saved)) {
-                          selected = i;
-                      }
-                  }
-                  ringtoneSpinner.setSelection(selected);
-                  ringtoneSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-                      @Override
-                      public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                          RingtoneHelper.setSelected(MainActivity.this,
-                                  "builtin:" + builtIn.get(position).uri);
-                          updateRingtoneLabel();
-                      }
-
-                      @Override
-                      public void onNothingSelected(AdapterView<?> parent) {
-                      }
-                  });
-                  ringCard.addView(ringtoneSpinner);
-
-                  customLabel = new TextView(this);
-                  customLabel.setTextColor(0xFF6B7280);
-                  customLabel.setTextSize(12);
-                  customLabel.setPadding(0, dp(this, 6), 0, dp(this, 8));
-                  ringCard.addView(customLabel);
-
-                  ringCard.addView(secondaryButton("选择自定义铃声", v -> pickCustomRingtone()));
-                  root.addView(ringCard);
-
-                  LinearLayout scheduleCard = card();
-                  scheduleCard.addView(section("启用时间段"));
-                  scheduleList = new LinearLayout(this);
-                  scheduleList.setOrientation(LinearLayout.VERTICAL);
-                  scheduleCard.addView(scheduleList);
-                  scheduleCard.addView(primaryButton("添加时间段", v -> showAddScheduleDialog()));
-                  root.addView(scheduleCard);
-
-                  LinearLayout testCard = card();
-                  testCard.addView(section("测试"));
-                  testCard.addView(primaryButton("测试响铃", v ->
-                          AlarmService.trigger(this, "测试消息", "这是测试铃声")));
-                  TextView note = new TextView(this);
-                  note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后请打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");
-                  note.setTextColor(0xFF6B7280);
-                  note.setTextSize(12);
-                  note.setPadding(0, dp(this, 16), 0, 0);
-                  testCard.addView(note);
-                  root.addView(testCard);
-
-                  setContentView(scroll);
-                  updateRingtoneLabel();
-              }
-
-              private LinearLayout card() {
-                  LinearLayout card = new LinearLayout(this);
-                  card.setOrientation(LinearLayout.VERTICAL);
-                  card.setPadding(dp(this, 18), dp(this, 16), dp(this, 18), dp(this, 16));
-                  GradientDrawable background = new GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR,
-                          new int[]{0xE6FFFFFF, 0xCCFFFFFF});
-                  background.setCornerRadius(dp(this, 24));
-                  background.setStroke(dp(this, 1), 0x99FFFFFF);
-                  card.setBackground(background);
-                  card.setElevation(0);
-                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                          LinearLayout.LayoutParams.MATCH_PARENT,
-                          LinearLayout.LayoutParams.WRAP_CONTENT);
-                  params.bottomMargin = dp(this, 16);
-                  card.setLayoutParams(params);
-                  return card;
-              }
-
-              private TextView section(String text) {
-                  TextView view = new TextView(this);
-                  view.setText(text);
-                  view.setTextColor(0xFF2563EB);
-                  view.setTextSize(13);
-                  view.setPadding(0, dp(this, 8), 0, dp(this, 8));
-                  return view;
-              }
-
-              private Button secondaryButton(String text, View.OnClickListener listener) {
-                  Button button = new Button(this);
-                  button.setText(text);
-                  button.setAllCaps(false);
-                  button.setTextSize(14);
-                  button.setTextColor(0xFF1F2937);
-                  button.setStateListAnimator(null);
-                  button.setElevation(0f);
-
-                  GradientDrawable background = new GradientDrawable();
-                  background.setColor(0xFFF3F6FB);
-                  background.setCornerRadius(dp(this, 14));
-                  background.setStroke(dp(this, 1), 0xFFE2E8F0);
-                  button.setBackground(new RippleDrawable(
-                          ColorStateList.valueOf(0x332563EB), background, background));
-
-                  button.setOnClickListener(listener);
-                  applyPressFeedback(button);
-                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                          LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 46));
-                  params.topMargin = dp(this, 8);
-                  button.setLayoutParams(params);
-                  return button;
-              }
-
-              private Button primaryButton(String text, View.OnClickListener listener) {
-                  Button button = new Button(this);
-                  button.setText(text);
-                  button.setAllCaps(false);
-                  button.setTextSize(15);
-                  button.setTextColor(Color.WHITE);
-                  button.setStateListAnimator(null);
-                  button.setElevation(0f);
-
-                  GradientDrawable background = new GradientDrawable();
-                  background.setColor(0xFF2563EB);
-                  background.setCornerRadius(dp(this, 14));
-                  button.setBackground(new RippleDrawable(
-                          ColorStateList.valueOf(0x40FFFFFF), background, background));
-
-                  button.setOnClickListener(listener);
-                  applyPressFeedback(button);
-                  LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                          LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 50));
-                  params.topMargin = dp(this, 10);
-                  button.setLayoutParams(params);
-                  return button;
-              }
-
-              private Button smallButton(String text, View.OnClickListener listener) {
-                  Button button = new Button(this);
-                  button.setText(text);
-                  button.setAllCaps(false);
-                  button.setTextSize(12);
-                  button.setTextColor(0xFFDC2626);
-                  button.setStateListAnimator(null);
-                  button.setElevation(0f);
-
-                  GradientDrawable background = new GradientDrawable();
-                  background.setColor(0xFFFFF1F2);
-                  background.setCornerRadius(dp(this, 12));
-                  button.setBackground(new RippleDrawable(
-                          ColorStateList.valueOf(0x33DC2626), background, background));
-
-                  button.setOnClickListener(listener);
-                  applyPressFeedback(button);
-                  button.setLayoutParams(new LinearLayout.LayoutParams(
-                          LinearLayout.LayoutParams.WRAP_CONTENT, dp(this, 36)));
-                  return button;
-              }
-
-              static void applyPressFeedback(View view) {
-                  view.setOnTouchListener((v, event) -> {
-                      switch (event.getActionMasked()) {
-                          case MotionEvent.ACTION_DOWN:
-                              v.animate()
-                                      .scaleX(0.96f)
-                                      .scaleY(0.96f)
-                                      .setDuration(90)
-                                      .start();
-                              v.performHapticFeedback(
-                                      HapticFeedbackConstants.KEYBOARD_TAP);
-                              break;
-                          case MotionEvent.ACTION_UP:
-                          case MotionEvent.ACTION_CANCEL:
-                              v.animate()
-                                      .scaleX(1f)
-                                      .scaleY(1f)
-                                      .setDuration(130)
-                                      .start();
-                              break;
-                      }
-                      return false;
-                  });
-              }
-
-              private NumberPicker makeDayPicker() {
-                  NumberPicker picker = new NumberPicker(this);
-                  picker.setMinValue(0);
-                  picker.setMaxValue(6);
-                  picker.setDisplayedValues(new String[]{
-                          "周一", "周二", "周三", "周四", "周五", "周六", "周日"
-                  });
-                  picker.setWrapSelectorWheel(true);
-                  return picker;
-              }
-
-              private NumberPicker makeNumberPicker(int min, int max, int value) {
-                  NumberPicker picker = new NumberPicker(this);
-                  picker.setMinValue(min);
-                  picker.setMaxValue(max);
-                  picker.setValue(value);
-                  picker.setWrapSelectorWheel(true);
-                  return picker;
-              }
-
-              private void showAddScheduleDialog() {
-                  LinearLayout box = new LinearLayout(this);
-                  box.setOrientation(LinearLayout.VERTICAL);
-                  box.setPadding(dp(this, 16), dp(this, 12), dp(this, 16), dp(this, 12));
-
-                  TextView startTitle = new TextView(this);
-                  startTitle.setText("开始");
-                  startTitle.setTextSize(14);
-                  startTitle.setTextColor(Color.DKGRAY);
-                  box.addView(startTitle);
-
-                  LinearLayout startRow = new LinearLayout(this);
-                  startRow.setOrientation(LinearLayout.HORIZONTAL);
-                  NumberPicker startDay = makeDayPicker();
-                  NumberPicker startHour = makeNumberPicker(0, 23, 18);
-                  NumberPicker startMinute = makeNumberPicker(0, 59, 0);
-                  startRow.addView(startDay,
-                          new LinearLayout.LayoutParams(0, dp(this, 140), 1.4f));
-                  startRow.addView(startHour,
-                          new LinearLayout.LayoutParams(0, dp(this, 140), 1f));
-                  startRow.addView(startMinute,
-                          new LinearLayout.LayoutParams(0, dp(this, 140), 1f));
-                  box.addView(startRow);
-
-                  TextView endTitle = new TextView(this);
-                  endTitle.setText("结束");
-                  endTitle.setTextSize(14);
-                  endTitle.setTextColor(Color.DKGRAY);
-                  endTitle.setPadding(0, dp(this, 12), 0, 0);
-                  box.addView(endTitle);
-
-                  LinearLayout endRow = new LinearLayout(this);
-                  endRow.setOrientation(LinearLayout.HORIZONTAL);
-                  NumberPicker endHour = makeNumberPicker(0, 23, 6);
-                  NumberPicker endMinute = makeNumberPicker(0, 59, 0);
-                  endRow.addView(endHour,
-                          new LinearLayout.LayoutParams(0, dp(this, 140), 1f));
-                  endRow.addView(endMinute,
-                          new LinearLayout.LayoutParams(0, dp(this, 140), 1f));
-                  box.addView(endRow);
-
-                  TextView tip = new TextView(this);
-                  tip.setText("结束时间早于开始时间，会自动按跨天处理");
-                  tip.setTextSize(12);
-                  tip.setTextColor(Color.GRAY);
-                  tip.setPadding(0, dp(this, 8), 0, 0);
-                  box.addView(tip);
-
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.addView(box);
-
-                  new AlertDialog.Builder(this)
-                          .setTitle("添加时间段")
-                          .setView(scroll)
-                          .setPositiveButton("添加", (dialog, which) -> {
-                              int days = 1 << startDay.getValue();
-                              int startMinutes =
-                                      startHour.getValue() * 60 + startMinute.getValue();
-                              int endMinutes =
-                                      endHour.getValue() * 60 + endMinute.getValue();
-
-                              List<ScheduleStore.Schedule> list =
-                                      ScheduleStore.getSchedules(MainActivity.this);
-                              list.add(new ScheduleStore.Schedule(days, startMinutes, endMinutes));
-                              ScheduleStore.saveSchedules(MainActivity.this, list);
-                              renderSchedules();
-                          })
-                          .setNegativeButton("取消", null)
-                          .show();
-              }
-
-              private void renderSchedules() {
-                  if (scheduleList == null) return;
-                  scheduleList.removeAllViews();
-                  List<ScheduleStore.Schedule> schedules = ScheduleStore.getSchedules(this);
-                  if (schedules.isEmpty()) {
-                      TextView empty = new TextView(this);
-                      empty.setText("还没有时间段，点下面添加");
-                      empty.setTextColor(0xFF6B7280);
-                      empty.setTextSize(13);
-                      scheduleList.addView(empty);
-                      return;
-                  }
-                  for (int i = 0; i < schedules.size(); i++) {
-                      final int index = i;
-                      LinearLayout row = new LinearLayout(this);
-                      row.setOrientation(LinearLayout.HORIZONTAL);
-                      row.setGravity(Gravity.CENTER_VERTICAL);
-                      row.setPadding(0, dp(this, 6), 0, dp(this, 6));
-
-                      TextView text = new TextView(this);
-                      text.setText(ScheduleStore.describe(schedules.get(i)));
-                      text.setTextColor(0xFF1F2937);
-                      text.setTextSize(13);
-                      text.setLayoutParams(new LinearLayout.LayoutParams(
-                              0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-
-                      Button delete = smallButton("删除", v -> {
-                          List<ScheduleStore.Schedule> list = ScheduleStore.getSchedules(MainActivity.this);
-                          if (index < list.size()) list.remove(index);
-                          ScheduleStore.saveSchedules(MainActivity.this, list);
-                          renderSchedules();
-                      });
-
-                      row.addView(text);
-                      row.addView(delete);
-                      scheduleList.addView(row);
-                  }
-              }
-
-              private void pickCustomRingtone() {
-                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                  intent.addCategory(Intent.CATEGORY_OPENABLE);
-                  intent.setType("audio/*");
-                  startActivityForResult(intent, 100);
-              }
-
-              @Override
-              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-                  super.onActivityResult(requestCode, resultCode, data);
-                  if (requestCode == 100 && resultCode == RESULT_OK && data != null && data.getData() != null) {
-                      try {
-                          InputStream in = getContentResolver().openInputStream(data.getData());
-                          File output = new File(getFilesDir(), "custom_ringtone");
-                          OutputStream out = new FileOutputStream(output);
-                          byte[] buffer = new byte[8192];
-                          int length;
-                          while (in != null && (length = in.read(buffer)) > 0) {
-                              out.write(buffer, 0, length);
+                          JSONArray arr = new JSONArray(prefs(c).getString(KEY, "[]"));
+                          for (int i = 0; i < arr.length(); i++) {
+                              JSONObject o = arr.getJSONObject(i);
+                              Entry e = new Entry();
+                              e.time = o.optLong("time"); e.title = o.optString("title"); e.text = o.optString("text"); e.result = o.optString("result");
+                              list.add(e);
                           }
-                          if (in != null) in.close();
-                          out.close();
-                          RingtoneHelper.setSelected(this, "custom:" + output.getAbsolutePath());
-                          updateRingtoneLabel();
-                          toast("自定义铃声已保存");
-                      } catch (Exception e) {
-                          toast("保存失败：" + e.getMessage());
-                      }
+                      } catch (Exception ignored) {}
+                      return list;
+                  }
+                  public static void clear(Context c) { prefs(c).edit().remove(KEY).apply(); }
+                  public static String latest(Context c) {
+                      List<Entry> list = getLogs(c);
+                      if (list.isEmpty()) return "暂无记录";
+                      return new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(new Date(list.get(0).time)) + " " + list.get(0).result;
                   }
               }
 
-              private void updateRingtoneLabel() {
-                  if (customLabel == null) return;
-                  String value = ScheduleStore.prefs(this).getString(ScheduleStore.KEY_RINGTONE, "");
-                  if (value.startsWith("custom:")) {
-                      customLabel.setText("当前：自定义铃声");
-                  } else {
-                      customLabel.setText("当前：系统铃声");
-                  }
-              }
-
-              private void updateStatus() {
-                  String notification = hasNotificationAccess() ? "已开启" : "未开启";
-                  String battery = isIgnoringBattery() ? "已忽略" : "未忽略";
-                  String dnd = isDndAllowed() ? "已授权" : "未授权";
-                  String fullScreen;
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                      fullScreen = nm.canUseFullScreenIntent() ? "已允许" : "未允许";
-                  } else {
-                      fullScreen = "系统版本无需设置";
-                  }
-                  status.setText("通知使用权：" + notification
-                          + "\n全屏通知：" + fullScreen
-                          + "\n电池优化：" + battery
-                          + "\n勿扰权限：" + dnd);
-              }
-
-              private boolean hasNotificationAccess() {
-                  String enabled = Settings.Secure.getString(
-                          getContentResolver(), "enabled_notification_listeners");
-                  return enabled != null && enabled.contains(getPackageName());
-              }
-
-              private boolean isIgnoringBattery() {
-                  PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-                  return pm.isIgnoringBatteryOptimizations(getPackageName());
-              }
-
-              private boolean isDndAllowed() {
-                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                  return nm.isNotificationPolicyAccessGranted();
-              }
-
-              private void requestNotificationPermission() {
-                  if (Build.VERSION.SDK_INT >= 33 &&
-                          checkSelfPermission("android.permission.POST_NOTIFICATIONS")
-                                  != PackageManager.PERMISSION_GRANTED) {
-                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
-                  }
-              }
-
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  updateStatus();
-                  if (ScheduleStore.isEnabled(this)) {
-                      AlarmService.startGuard(this);
-                  }
-              }
-
-              private void toast(String text) {
-                  Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
-              }
-
-              static int dp(Context context, int value) {
-                  return Math.round(value * context.getResources().getDisplayMetrics().density);
-              }
-
-              public static class ScheduleStore {
-                  public static final String PREFS = "feishu_alarm";
-                  public static final String KEY_SCHEDULES = "schedules";
-                  public static final String KEY_ENABLED = "enabled";
-                  public static final String KEY_RINGTONE = "ringtone";
-                  public static final String KEY_LAST_RING = "last_ring";
-
-                  public static class Schedule {
-                      public final int days;
-                      public final int start;
-                      public final int end;
-
-                      public Schedule(int days, int start, int end) {
-                          this.days = days;
-                          this.start = start;
-                          this.end = end;
-                      }
-                  }
-
-                  public static SharedPreferences prefs(Context context) {
-                      return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-                  }
-
-                  public static boolean isEnabled(Context context) {
-                      return prefs(context).getBoolean(KEY_ENABLED, true);
-                  }
-
-                  public static void setEnabled(Context context, boolean enabled) {
-                      prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply();
-                  }
-
-                  public static List<Schedule> getSchedules(Context context) {
-                      List<Schedule> result = new ArrayList<>();
-                      try {
-                          JSONArray array = new JSONArray(
-                                  prefs(context).getString(KEY_SCHEDULES, "[]"));
-                          for (int i = 0; i < array.length(); i++) {
-                              JSONObject object = array.getJSONObject(i);
-                              result.add(new Schedule(
-                                      object.optInt("days"),
-                                      object.optInt("start"),
-                                      object.optInt("end")));
-                          }
-                      } catch (Exception ignored) {
-                      }
-                      return result;
-                  }
-
-                  public static void saveSchedules(Context context, List<Schedule> schedules) {
-                      JSONArray array = new JSONArray();
-                      for (Schedule schedule : schedules) {
-                          JSONObject object = new JSONObject();
-                          try {
-                              object.put("days", schedule.days);
-                              object.put("start", schedule.start);
-                              object.put("end", schedule.end);
-                          } catch (Exception ignored) {
-                          }
-                          array.put(object);
-                      }
-                      prefs(context).edit().putString(KEY_SCHEDULES, array.toString()).apply();
-                  }
-
-                  public static boolean isActive(Context context, long now) {
-                      if (!isEnabled(context)) return false;
-                      List<Schedule> schedules = getSchedules(context);
-                      if (schedules.isEmpty()) return false;
-
-                      Calendar calendar = Calendar.getInstance();
-                      calendar.setTimeInMillis(now);
-                      int dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK);
-                      int todayBit = 1 << ((dayOfWeek + 5) % 7);
-                      int yesterdayBit = 1 << ((dayOfWeek + 4) % 7);
-                      int minutes = calendar.get(Calendar.HOUR_OF_DAY) * 60
-                              + calendar.get(Calendar.MINUTE);
-
-                      for (Schedule schedule : schedules) {
-                          if (schedule.start == schedule.end) {
-                              if ((schedule.days & todayBit) != 0) return true;
-                          } else if (schedule.start < schedule.end) {
-                              if ((schedule.days & todayBit) != 0
-                                      && minutes >= schedule.start
-                                      && minutes < schedule.end) {
-                                  return true;
-                              }
-                          } else {
-                              if (((schedule.days & todayBit) != 0 && minutes >= schedule.start)
-                                      || ((schedule.days & yesterdayBit) != 0 && minutes < schedule.end)) {
-                                  return true;
-                              }
-                          }
-                      }
-                      return false;
-                  }
-
-                  public static String describe(Schedule schedule) {
-                      String[] names = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
-                      StringBuilder builder = new StringBuilder();
-                      int startIndex = -1;
-                      for (int i = 0; i < 7; i++) {
-                          if ((schedule.days & (1 << i)) != 0) {
-                              if (startIndex == -1) startIndex = i;
-                              if (builder.length() > 0) builder.append("、");
-                              builder.append(names[i]);
-                          }
-                      }
-                      if (builder.length() == 0) builder.append("未选日期");
-                      if (schedule.end < schedule.start && startIndex >= 0) {
-                          String endDay = names[(startIndex + 1) % 7];
-                          return builder.toString() + "  " + time(schedule.start)
-                                  + " - " + endDay + " " + time(schedule.end);
-                      }
-                      return builder.toString() + "  " + time(schedule.start)
-                              + " - " + time(schedule.end);
-                  }
-
-                  public static String time(int minutes) {
-                      return String.format("%02d:%02d", minutes / 60, minutes % 60);
-                  }
-              }
-
-              public static class RingtoneHelper {
-                  public static class Option {
-                      public final String title;
-                      public final Uri uri;
-
-                      public Option(String title, Uri uri) {
-                          this.title = title;
-                          this.uri = uri;
-                      }
-                  }
-
-                  private static Ringtone preview;
-
-                  public static List<Option> getBuiltIn(Context context) {
-                      List<Option> result = new ArrayList<>();
-                      RingtoneManager manager = new RingtoneManager(context);
-                      manager.setType(RingtoneManager.TYPE_ALARM);
-                      Cursor cursor = manager.getCursor();
-                      while (cursor != null && cursor.moveToNext() && result.size() < 5) {
-                          Uri uri = manager.getRingtoneUri(cursor.getPosition());
-                          if (uri != null) {
-                              result.add(new Option(
-                                      cursor.getString(RingtoneManager.TITLE_COLUMN_INDEX), uri));
-                          }
-                      }
-                      if (cursor != null) cursor.close();
-                      if (result.isEmpty()) {
-                          result.add(new Option("默认闹钟",
-                                  RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)));
-                      }
-                      return result;
-                  }
-
-                  public static void setSelected(Context context, String value) {
-                      ScheduleStore.prefs(context).edit()
-                              .putString(ScheduleStore.KEY_RINGTONE, value).apply();
-                  }
-
-                  public static Uri getSelectedUri(Context context) {
-                      String value = ScheduleStore.prefs(context)
-                              .getString(ScheduleStore.KEY_RINGTONE, "");
-                      if (value.startsWith("custom:")) {
-                          File file = new File(value.substring(7));
-                          if (file.exists()) return Uri.fromFile(file);
-                      }
-                      if (value.startsWith("builtin:")) {
-                          try {
-                              return Uri.parse(value.substring(8));
-                          } catch (Exception ignored) {
-                          }
-                      }
-                      return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
-                  }
-
-                  public static void playPreview(Context context) {
-                      try {
-                          if (preview != null) preview.stop();
-                          preview = RingtoneManager.getRingtone(context, getSelectedUri(context));
-                          if (preview != null) preview.play();
-                      } catch (Exception ignored) {
-                      }
-                  }
-              }
-
-              public static class FeishuNotificationListener extends android.service.notification.NotificationListenerService {
-                  private static final String[] PACKAGES = {
-                          "com.ss.android.lark",
-                          "com.larksuite.suite"
-                  };
-
-                  @Override
-                  public void onNotificationPosted(android.service.notification.StatusBarNotification sbn) {
-                      if (sbn == null) return;
-                      boolean isFeishu = false;
-                      for (String pkg : PACKAGES) {
-                          if (pkg.equals(sbn.getPackageName())) {
-                              isFeishu = true;
-                              break;
-                          }
-                      }
-                      if (!isFeishu) return;
-                      if (!ScheduleStore.isEnabled(this)) return;
-                      if (!ScheduleStore.isActive(this, System.currentTimeMillis())) return;
-                      if (AlarmService.isRinging) return;
-
-                      long now = System.currentTimeMillis();
-                      long last = ScheduleStore.prefs(this).getLong(ScheduleStore.KEY_LAST_RING, 0);
-                      if (now - last < 5000) return;
-                      ScheduleStore.prefs(this).edit().putLong(ScheduleStore.KEY_LAST_RING, now).apply();
-
-                      Notification notification = sbn.getNotification();
-                      Bundle extras = notification.extras;
-                      String title = extras.getString(Notification.EXTRA_TITLE, "飞书消息");
-                      String text = extras.getString(Notification.EXTRA_TEXT, "");
-                      if (text == null || text.isEmpty()) {
-                          text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条飞书消息");
-                      }
-                      AlarmService.trigger(this, title, text);
-                  }
-              }
-
-              public static class AlarmService extends Service {
-                  public static final String ACTION_TRIGGER = "com.example.feishualarm.TRIGGER";
-                  public static final String ACTION_STOP = "com.example.feishualarm.STOP";
-                  private static final String CHANNEL_GUARD = "feishu_guard";
-                  private static final String CHANNEL_ALARM = "feishu_alarm";
-                  private static final int ID_GUARD = 1;
-                  private static final int ID_ALARM = 2;
-
-                  public static volatile boolean isRinging = false;
-
-                  private MediaPlayer player;
-                  private Vibrator vibrator;
-                  private PowerManager.WakeLock wakeLock;
-                  private AudioManager audioManager;
-                  private int originalVolume = -1;
-                  private Handler volumeHandler;
-                  private Runnable volumeGuard;
-                  private String title = "飞书消息";
-                  private String text = "";
-
-                  public static void startGuard(Context context) {
-                      Intent intent = new Intent(context, AlarmService.class);
-                      if (Build.VERSION.SDK_INT >= 26) {
-                          context.startForegroundService(intent);
-                      } else {
-                          context.startService(intent);
-                      }
-                  }
-
-                  public static void stopGuard(Context context) {
-                      context.stopService(new Intent(context, AlarmService.class));
-                  }
-
-                  public static void trigger(Context context, String title, String text) {
-                      Intent intent = new Intent(context, AlarmService.class);
-                      intent.setAction(ACTION_TRIGGER);
-                      intent.putExtra("title", title);
-                      intent.putExtra("text", text);
-                      if (Build.VERSION.SDK_INT >= 26) {
-                          context.startForegroundService(intent);
-                      } else {
-                          context.startService(intent);
-                      }
-                  }
-
-                  public static void stop(Context context) {
-                      Intent intent = new Intent(context, AlarmService.class);
-                      intent.setAction(ACTION_STOP);
-                      context.startService(intent);
-                  }
-
-                  @Override
-                  public void onCreate() {
-                      super.onCreate();
-                      createChannels();
-                      startForeground(ID_GUARD, guardNotification());
-                  }
-
-                  @Override
-                  public int onStartCommand(Intent intent, int flags, int startId) {
-                      if (intent != null && ACTION_TRIGGER.equals(intent.getAction())) {
-                          String newTitle = intent.getStringExtra("title");
-                          String newText = intent.getStringExtra("text");
-                          if (newTitle != null) title = newTitle;
-                          if (newText != null) text = newText;
-                          triggerAlarm();
-                      } else if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-                          stopAlarm();
-                      }
-                      return START_STICKY;
-                  }
-
-                  private void triggerAlarm() {
-                      if (isRinging) return;
-                      isRinging = true;
-                      startSoundAndVibration();
-                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                      nm.notify(ID_ALARM, alarmNotification());
-                      launchAlarmActivity();
-                  }
-
-                  private void stopAlarm() {
-                      isRinging = false;
-                      stopSoundAndVibration();
-                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                      nm.cancel(ID_ALARM);
-                      nm.notify(ID_GUARD, guardNotification());
-                  }
-
-                  private void startSoundAndVibration() {
-                      try {
-                          audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
-                          originalVolume = audioManager.getStreamVolume(AudioManager.STREAM_ALARM);
-                          audioManager.setStreamVolume(AudioManager.STREAM_ALARM,
-                                  audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0);
-                      } catch (Exception ignored) {
-                      }
-
-                      try {
-                          player = new MediaPlayer();
-                          player.setAudioAttributes(new AudioAttributes.Builder()
-                                  .setUsage(AudioAttributes.USAGE_ALARM)
-                                  .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                  .build());
-                          player.setDataSource(this, RingtoneHelper.getSelectedUri(this));
-                          player.setLooping(true);
-                          player.prepare();
-                          player.start();
-                      } catch (Exception e) {
-                          try {
-                              player = MediaPlayer.create(this,
-                                      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM));
-                              if (player != null) {
-                                  player.setLooping(true);
-                                  player.start();
-                              }
-                          } catch (Exception ignored) {
-                          }
-                      }
-
-                      try {
-                          vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
-                          if (vibrator != null && vibrator.hasVibrator()) {
-                              long[] pattern = {0, 800, 400, 800, 400};
-                              if (Build.VERSION.SDK_INT >= 26) {
-                                  vibrator.vibrate(VibrationEffect.createWaveform(pattern, 0));
-                              } else {
-                                  vibrator.vibrate(pattern, 0);
-                              }
-                          }
-                      } catch (Exception ignored) {
-                      }
-
-                      PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FeishuAlarm::Ring");
-                      wakeLock.acquire();
-                      startVolumeGuard();
-                  }
-
-                  private void startVolumeGuard() {
-                      if (audioManager == null) return;
-                      volumeHandler = new Handler(Looper.getMainLooper());
-                      volumeGuard = new Runnable() {
-                          @Override
-                          public void run() {
-                              if (!isRinging || audioManager == null) return;
-                              try {
-                                  int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM);
-                                  int current = audioManager.getStreamVolume(AudioManager.STREAM_ALARM);
-                                  if (current < max) {
-                                      audioManager.setStreamVolume(
-                                              AudioManager.STREAM_ALARM, max, 0);
-                                  }
-                              } catch (Exception ignored) {
-                              }
-                              if (volumeHandler != null) {
-                                  volumeHandler.postDelayed(this, 500);
-                              }
-                          }
-                      };
-                      volumeHandler.postDelayed(volumeGuard, 500);
-                  }
-
-                  private void stopVolumeGuard() {
-                      if (volumeHandler != null && volumeGuard != null) {
-                          volumeHandler.removeCallbacks(volumeGuard);
-                      }
-                      volumeHandler = null;
-                      volumeGuard = null;
-                  }
-
-                  private void stopSoundAndVibration() {
-                      stopVolumeGuard();
-                      if (player != null) {
-                          try {
-                              player.stop();
-                          } catch (Exception ignored) {
-                          }
-                          player.release();
-                          player = null;
-                      }
-                      if (vibrator != null) {
-                          vibrator.cancel();
-                          vibrator = null;
-                      }
-                      if (wakeLock != null && wakeLock.isHeld()) {
-                          wakeLock.release();
-                          wakeLock = null;
-                      }
-                      if (audioManager != null && originalVolume >= 0) {
-                          try {
-                              audioManager.setStreamVolume(
-                                      AudioManager.STREAM_ALARM, originalVolume, 0);
-                          } catch (Exception ignored) {
-                          }
-                          originalVolume = -1;
-                      }
-                  }
-
-                  private void launchAlarmActivity() {
-                      Intent intent = new Intent(this, AlarmActivity.class);
-                      intent.putExtra("title", title);
-                      intent.putExtra("text", text);
-                      intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                              | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                              | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                      try {
-                          startActivity(intent);
-                      } catch (Exception ignored) {
-                      }
-                  }
-
-                  private void createChannels() {
-                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                      NotificationChannel guard = new NotificationChannel(
-                              CHANNEL_GUARD, "飞书铃声守护", NotificationManager.IMPORTANCE_LOW);
-                      nm.createNotificationChannel(guard);
-
-                      NotificationChannel alarm = new NotificationChannel(
-                              CHANNEL_ALARM, "飞书响铃", NotificationManager.IMPORTANCE_HIGH);
-                      alarm.setSound(null, null);
-                      alarm.enableVibration(false);
-                      nm.createNotificationChannel(alarm);
-                  }
-
-                  private Notification guardNotification() {
-                      Intent open = new Intent(this, MainActivity.class);
-                      PendingIntent pi = PendingIntent.getActivity(this, 10, open,
-                              PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                      return new Notification.Builder(this, CHANNEL_GUARD)
-                              .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                              .setContentTitle("飞书夜班铃声")
-                              .setContentText("正在监听飞书消息")
-                              .setOngoing(true)
-                              .setContentIntent(pi)
-                              .build();
-                  }
-
-                  private Notification alarmNotification() {
-                      Intent open = new Intent(this, AlarmActivity.class);
-                      open.putExtra("title", title);
-                      open.putExtra("text", text);
-                      PendingIntent pi = PendingIntent.getActivity(this, 11, open,
-                              PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                      return new Notification.Builder(this, CHANNEL_ALARM)
-                              .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                              .setContentTitle("飞书消息")
-                              .setContentText(title)
-                              .setCategory(Notification.CATEGORY_ALARM)
-                              .setPriority(Notification.PRIORITY_MAX)
-                              .setVisibility(Notification.VISIBILITY_PUBLIC)
-                              .setOngoing(true)
-                              .setContentIntent(pi)
-                              .setFullScreenIntent(pi, true)
-                              .build();
-                  }
-
-                  @Override
-                  public void onDestroy() {
-                      stopAlarm();
-                      super.onDestroy();
-                  }
-
-                  @Override
-                  public IBinder onBind(Intent intent) {
-                      return null;
-                  }
-              }
-
-              public static class AlarmActivity extends Activity {
-
-                  private boolean pendingStop = false;
-
-                  @Override
-                  protected void onCreate(Bundle savedInstanceState) {
-                      super.onCreate(savedInstanceState);
-                      setVolumeControlStream(AudioManager.STREAM_ALARM);
-                      getWindow().addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
-                      getWindow().setStatusBarColor(0xFFFDF2F2);
-                      getWindow().setNavigationBarColor(0xFFFDF2F2);
-                      getWindow().getDecorView().setSystemUiVisibility(
-                              View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                                      | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-
-                      if (Build.VERSION.SDK_INT >= 27) {
-                          setShowWhenLocked(true);
-                          setTurnScreenOn(true);
-                      }
-                      getWindow().addFlags(
-                              WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                                      | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                                      | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                                      | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
-
-                      String title = getIntent().getStringExtra("title");
-                      String text = getIntent().getStringExtra("text");
-                      if (title == null) title = "飞书消息";
-                      if (text == null) text = "";
-
+              public static class PermissionCheckActivity extends Activity {
+                  @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
+                  @Override protected void onResume() { super.onResume(); render(); }
+                  @Override public void onRequestPermissionsResult(int code, String[] p, int[] r) { super.onRequestPermissionsResult(code, p, r); render(); }
+                  private void render() {
+                      ScrollView scroll = new ScrollView(this);
                       LinearLayout root = new LinearLayout(this);
                       root.setOrientation(LinearLayout.VERTICAL);
-                      root.setGravity(Gravity.CENTER);
-                      root.setPadding(dp(this, 20), dp(this, 24), dp(this, 20), dp(this, 24));
-                      root.setBackground(new GradientDrawable(
-                              GradientDrawable.Orientation.TL_BR,
-                              new int[]{0xFFFDF2F2, 0xFFF8FAFF, 0xFFEEF4FF}));
-
-                      LinearLayout card = new LinearLayout(this);
-                      card.setOrientation(LinearLayout.VERTICAL);
-                      card.setPadding(dp(this, 24), dp(this, 24), dp(this, 24), dp(this, 24));
-                      GradientDrawable background = new GradientDrawable(
-                              GradientDrawable.Orientation.TL_BR,
-                              new int[]{0xF2FFFFFF, 0xE6FFFFFF});
-                      background.setCornerRadius(dp(this, 28));
-                      background.setStroke(dp(this, 1), 0xCCFFFFFF);
-                      card.setBackground(background);
-                      card.setElevation(0);
-
-                      TextView label = new TextView(this);
-                      label.setText("飞书消息");
-                      label.setTextColor(0xFFDC2626);
-                      label.setTextSize(15);
-                      label.setGravity(Gravity.CENTER);
-                      card.addView(label);
-
-                      TextView titleView = new TextView(this);
-                      titleView.setText(title);
-                      titleView.setTextColor(0xFF111827);
-                      titleView.setTextSize(26);
-                      titleView.setGravity(Gravity.CENTER);
-                      titleView.setPadding(0, dp(this, 16), 0, dp(this, 8));
-                      card.addView(titleView);
-
-                      TextView textView = new TextView(this);
-                      textView.setText(text);
-                      textView.setTextColor(0xFF4B5563);
-                      textView.setTextSize(15);
-                      textView.setGravity(Gravity.CENTER);
-                      textView.setPadding(0, 0, 0, dp(this, 24));
-                      card.addView(textView);
-
-                      TextView note = new TextView(this);
-                      note.setText("必须解锁手机，进入本 App 点击停止");
-                      note.setTextColor(0xFF6B7280);
-                      note.setTextSize(12);
-                      note.setGravity(Gravity.CENTER);
-                      card.addView(note);
-
-                      Button stop = new Button(this);
-                      stop.setText("停止铃声（需要解锁）");
-                      stop.setTextSize(16);
-                      stop.setAllCaps(false);
-                      stop.setTextColor(Color.WHITE);
-                      stop.setStateListAnimator(null);
-                      stop.setElevation(0f);
-                      GradientDrawable stopBackground = new GradientDrawable();
-                      stopBackground.setColor(0xFFDC2626);
-                      stopBackground.setCornerRadius(dp(this, 16));
-                      stop.setBackground(new RippleDrawable(
-                              ColorStateList.valueOf(0x40FFFFFF),
-                              stopBackground, stopBackground));
-                      stop.setOnClickListener(v -> requestStop());
-                      applyPressFeedback(stop);
-                      LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(
-                              LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 56));
-                      stopParams.topMargin = dp(this, 20);
-                      card.addView(stop, stopParams);
-
-                      LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
-                              LinearLayout.LayoutParams.MATCH_PARENT,
-                              LinearLayout.LayoutParams.WRAP_CONTENT);
-                      root.addView(card, cardParams);
-                      setContentView(root);
-                  }
-
-                  private void requestStop() {
-                      KeyguardManager keyguardManager =
-                              (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-                      if (keyguardManager != null && keyguardManager.isKeyguardLocked()) {
-                          pendingStop = true;
-                          keyguardManager.requestDismissKeyguard(this, null);
+                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
+                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
+                      root.addView(text(this, "权限自检", 26, 0xFF1E2430));
+                      TextView sub = text(this, "全部绿灯，飞书消息才不会被系统拦掉", 13, 0xFF6B7280);
+                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
+                      addRow(root, "通知使用权", "读取飞书通知的钥匙", hasAccess(), "去开启", v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)), null);
+                      addRow(root, "通知权限", "Android 13 以上要允许本 App 发通知", notificationsEnabled(), "去开启", v -> askNotify(), null);
+                      addRow(root, "电池优化白名单", "防止系统把后台监控杀掉", ignoringBattery(), "去设置", v -> open(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()))), null);
+                      addRow(root, "勿扰访问权限", "读取勿扰状态，避免静音时漏消息", dndAllowed(), "去授权", v -> open(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)), null);
+                      if (Build.VERSION.SDK_INT >= 34) {
+                          addRow(root, "全屏通知", "锁屏时弹出响铃页面", canFullScreen(), "去允许", v -> open(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + getPackageName()))), null);
                       } else {
-                          stopAlarm();
+                          addRow(root, "全屏通知", "当前系统版本默认允许", true, "", null, null);
                       }
+                      addRow(root, "自启动 / 后台弹出", "小米、OPPO、vivo 等机型需在厂商设置里手动允许", false, "去查看", v -> open(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))), "需手动确认");
+                      Button refresh = button(this, "刷新状态", true);
+                      refresh.setOnClickListener(v -> render());
+                      root.addView(refresh, params(this, true));
+                      scroll.addView(root); setContentView(scroll);
                   }
+                  private void addRow(LinearLayout parent, String title, String desc, boolean ok, String action, View.OnClickListener listener, String override) {
+                      LinearLayout c = card(this);
+                      LinearLayout head = new LinearLayout(this); head.setOrientation(LinearLayout.HORIZONTAL); head.setGravity(Gravity.CENTER_VERTICAL);
+                      TextView t = text(this, title, 15, 0xFF1F2937); t.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)); head.addView(t);
+                      String status = override != null ? override : (ok ? "已开启" : "未开启");
+                      int color = override != null ? 0xFF6B7280 : (ok ? 0xFF16A34A : 0xFFDC2626);
+                      head.addView(text(this, status, 12, color)); c.addView(head);
+                      TextView d = text(this, desc, 12, 0xFF6B7280); d.setPadding(0, dp(this, 4), 0, dp(this, 8)); c.addView(d);
+                      if (!ok && listener != null) { Button b = button(this, action, false); b.setOnClickListener(listener); c.addView(b, params(this, false)); }
+                      parent.addView(c);
+                  }
+                  private boolean hasAccess() { return MainActivity.FeishuNotificationListener.hasAccess(this); }
+                  private boolean notificationsEnabled() {
+                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                      if (!nm.areNotificationsEnabled()) return false;
+                      return Build.VERSION.SDK_INT < 33 || checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
+                  }
+                  private boolean ignoringBattery() { return ((PowerManager) getSystemService(POWER_SERVICE)).isIgnoringBatteryOptimizations(getPackageName()); }
+                  private boolean dndAllowed() { return ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).isNotificationPolicyAccessGranted(); }
+                  private boolean canFullScreen() { return Build.VERSION.SDK_INT < 34 || ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).canUseFullScreenIntent(); }
+                  private void askNotify() {
+                      if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
+                      else { Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS); i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()); open(i); }
+                  }
+                  private void open(Intent i) { try { startActivity(i); } catch (Exception e) { Toast.makeText(this, "打不开系统设置，请手动去设置里找", Toast.LENGTH_SHORT).show(); } }
+              }
 
-                  @Override
-                  protected void onResume() {
-                      super.onResume();
-                      if (pendingStop) {
-                          KeyguardManager keyguardManager =
-                                  (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-                          if (keyguardManager == null || !keyguardManager.isKeyguardLocked()) {
-                              pendingStop = false;
-                              stopAlarm();
+              public static class TriggerLogActivity extends Activity {
+                  @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
+                  private void render() {
+                      ScrollView scroll = new ScrollView(this);
+                      LinearLayout root = new LinearLayout(this);
+                      root.setOrientation(LinearLayout.VERTICAL);
+                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
+                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
+                      root.addView(text(this, "触发日志", 26, 0xFF1E2430));
+                      TextView sub = text(this, "最近 50 条飞书通知的处理结果", 13, 0xFF6B7280);
+                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
+                      List<TriggerLogStore.Entry> logs = TriggerLogStore.getLogs(this);
+                      if (logs.isEmpty()) root.addView(text(this, "还没有记录", 13, 0xFF6B7280));
+                      SimpleDateFormat f = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.CHINA);
+                      for (TriggerLogStore.Entry e : logs) {
+                          LinearLayout c = card(this);
+                          LinearLayout head = new LinearLayout(this); head.setOrientation(LinearLayout.HORIZONTAL); head.setGravity(Gravity.CENTER_VERTICAL);
+                          TextView time = text(this, f.format(new Date(e.time)), 12, 0xFF6B7280);
+                          time.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)); head.addView(time);
+                          head.addView(text(this, e.result, 12, resultColor(e.result))); c.addView(head);
+                          c.addView(text(this, e.title, 14, 0xFF1F2937));
+                          if (!e.text.isEmpty()) { TextView body = text(this, e.text, 12, 0xFF6B7280); body.setPadding(0, dp(this, 3), 0, 0); c.addView(body); }
+                          root.addView(c);
+                      }
+                      Button clear = button(this, "清空记录", false);
+                      clear.setOnClickListener(v -> { TriggerLogStore.clear(this); render(); });
+                      root.addView(clear, params(this, false));
+                      scroll.addView(root); setContentView(scroll);
+                  }
+                  private int resultColor(String r) { if ("已响铃".equals(r)) return 0xFFDC2626; if ("已停止".equals(r)) return 0xFF16A34A; return 0xFF6B7280; }
+              }
+
+              public static class ShiftPatternStore {
+                  private static final String KEY_ENABLED = "shift_enabled", KEY_ANCHOR = "shift_anchor", KEY_WINDOWS = "shift_windows";
+                  public static class Window { public int start, end; public boolean on; public Window(int s, int e, boolean o) { start = s; end = e; on = o; } }
+                  static SharedPreferences prefs(Context c) { return MainActivity.ScheduleStore.prefs(c); }
+                  public static boolean isEnabled(Context c) { return prefs(c).getBoolean(KEY_ENABLED, false); }
+                  public static void setEnabled(Context c, boolean v) { prefs(c).edit().putBoolean(KEY_ENABLED, v).apply(); }
+                  public static long getAnchor(Context c) { return prefs(c).getLong(KEY_ANCHOR, 0); }
+                  public static void setAnchor(Context c, long v) { prefs(c).edit().putLong(KEY_ANCHOR, v).apply(); }
+                  public static Window[] defaults() { return new Window[]{new Window(1350, 450, true), new Window(570, 1020, true), new Window(1380, 510, true)}; }
+                  public static Window[] getWindows(Context c) {
+                      Window[] w = defaults();
+                      try {
+                          JSONArray a = new JSONArray(prefs(c).getString(KEY_WINDOWS, "[]"));
+                          for (int i = 0; i < 3 && i < a.length(); i++) {
+                              JSONObject o = a.getJSONObject(i);
+                              w[i].start = o.optInt("start", w[i].start); w[i].end = o.optInt("end", w[i].end); w[i].on = o.optBoolean("on", w[i].on);
                           }
+                      } catch (Exception ignored) {}
+                      return w;
+                  }
+                  public static void saveWindow(Context c, int index, int start, int end, boolean on) {
+                      Window[] w = getWindows(c); w[index].start = start; w[index].end = end; w[index].on = on;
+                      JSONArray a = new JSONArray();
+                      for (Window x : w) {
+                          try { JSONObject o = new JSONObject(); o.put("start", x.start); o.put("end", x.end); o.put("on", x.on); a.put(o); } catch (Exception ignored) {}
                       }
+                      prefs(c).edit().putString(KEY_WINDOWS, a.toString()).apply();
                   }
-
-                  @Override
-                  public boolean onKeyDown(int keyCode, KeyEvent event) {
-                      if (keyCode == KeyEvent.KEYCODE_VOLUME_UP
-                              || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
-                              || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
-                          return true;
+                  public static int phaseNow(Context c) { return phaseAt(c, System.currentTimeMillis()); }
+                  public static int phaseAt(Context c, long t) { long a = getAnchor(c); return a == 0 ? -1 : (int) Math.floorMod(days(a, t), 4L); }
+                  private static long days(long a, long b) {
+                      Calendar ca = Calendar.getInstance(); ca.setTimeInMillis(a); zero(ca);
+                      Calendar cb = Calendar.getInstance(); cb.setTimeInMillis(b); zero(cb);
+                      return (cb.getTimeInMillis() - ca.getTimeInMillis()) / 86400000L;
+                  }
+                  private static void zero(Calendar c) { c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0); }
+                  public static String phaseName(int p) { return p == 0 ? "白班" : p == 1 ? "夜班" : "休息"; }
+                  public static String todayText(Context c) { int p = phaseNow(c); return p < 0 ? "未设置锚点日期" : "今天：" + phaseName(p) + "（第" + (p + 1) + "天）"; }
+                  public static boolean isActive(Context c, long now) {
+                      if (!isEnabled(c) || getAnchor(c) == 0) return false;
+                      long d = days(getAnchor(c), now);
+                      int today = (int) Math.floorMod(d, 4L), yesterday = (int) Math.floorMod(d - 1L, 4L);
+                      Window[] w = getWindows(c);
+                      Window tw = w[today == 0 ? 0 : today == 1 ? 1 : 2], yw = w[yesterday == 0 ? 0 : yesterday == 1 ? 1 : 2];
+                      Calendar cal = Calendar.getInstance(); cal.setTimeInMillis(now);
+                      int m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
+                      if (tw.on) {
+                          if (tw.start == tw.end) return true;
+                          if (tw.start < tw.end) { if (m >= tw.start && m < tw.end) return true; }
+                          else if (m >= tw.start) return true;
                       }
-                      return super.onKeyDown(keyCode, event);
+                      return yw.on && yw.start > yw.end && m < yw.end;
                   }
+                  public static String windowText(Window w) { return time(w.start) + " - " + (w.end < w.start ? "次日 " : "") + time(w.end); }
+                  public static String time(int m) { return String.format(Locale.CHINA, "%02d:%02d", m / 60, m % 60); }
+              }
 
-                  @Override
-                  public boolean onKeyUp(int keyCode, KeyEvent event) {
-                      if (keyCode == KeyEvent.KEYCODE_VOLUME_UP
-                              || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
-                              || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
-                          return true;
+              public static class ShiftPatternActivity extends Activity {
+                  @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
+                  @Override protected void onResume() { super.onResume(); render(); }
+                  private void render() {
+                      ScrollView scroll = new ScrollView(this);
+                      LinearLayout root = new LinearLayout(this);
+                      root.setOrientation(LinearLayout.VERTICAL);
+                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
+                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
+                      root.addView(text(this, "白夜休休模板", 26, 0xFF1E2430));
+                      TextView sub = text(this, "以锚点日期为第1天，按 白班 → 夜班 → 休 → 休 四天循环", 13, 0xFF6B7280);
+                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
+
+                      CheckBox enable = new CheckBox(this);
+                      enable.setText("启用班表模板"); enable.setTextSize(16); enable.setTextColor(0xFF1E2430);
+                      enable.setChecked(ShiftPatternStore.isEnabled(this));
+                      enable.setOnCheckedChangeListener((v, checked) -> {
+                          ShiftPatternStore.setEnabled(this, checked);
+                          if (checked && ShiftPatternStore.getAnchor(this) == 0) {
+                              Calendar c = Calendar.getInstance(); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0);
+                              ShiftPatternStore.setAnchor(this, c.getTimeInMillis());
+                          }
+                          render();
+                      });
+                      root.addView(enable);
+
+                      long anchor = ShiftPatternStore.getAnchor(this);
+                      String anchorText = anchor == 0 ? "设置锚点日期（选你最近一次白班）" : "锚点日期：" + new SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).format(new Date(anchor)) + "（第1天·白班）";
+                      Button anchorBtn = button(this, anchorText, false);
+                      anchorBtn.setOnClickListener(v -> pickAnchor());
+                      root.addView(anchorBtn, params(this, false));
+
+                      TextView status = text(this, ShiftPatternStore.todayText(this) + (ShiftPatternStore.isActive(this, System.currentTimeMillis()) ? " · 当前监控中" : " · 当前不在时段"), 13, 0xFF2563EB);
+                      status.setPadding(0, dp(this, 10), 0, dp(this, 8)); root.addView(status);
+
+                      String[] names = {"白班监控", "夜班监控", "休息监控"};
+                      ShiftPatternStore.Window[] ws = ShiftPatternStore.getWindows(this);
+                      for (int i = 0; i < 3; i++) {
+                          final int index = i;
+                          LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL);
+                          CheckBox box = new CheckBox(this);
+                          box.setText(names[i] + "\n" + ShiftPatternStore.windowText(ws[i]));
+                          box.setTextSize(13); box.setTextColor(0xFF1F2937); box.setChecked(ws[i].on);
+                          box.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                          box.setOnCheckedChangeListener((v, checked) -> { ws[index].on = checked; ShiftPatternStore.saveWindow(this, index, ws[index].start, ws[index].end, checked); });
+                          row.addView(box);
+                          Button edit = button(this, "修改", false);
+                          edit.setLayoutParams(new LinearLayout.LayoutParams(dp(this, 72), dp(this, 40)));
+                          edit.setOnClickListener(v -> editWindow(index, ws[index]));
+                          row.addView(edit); root.addView(row);
                       }
-                      return super.onKeyUp(keyCode, event);
+
+                      Button back = button(this, "返回", false);
+                      back.setOnClickListener(v -> finish());
+                      root.addView(back, params(this, false));
+                      scroll.addView(root); setContentView(scroll);
                   }
 
-                  private void stopAlarm() {
-                      AlarmService.stop(this);
-                      finish();
+                  private void editWindow(int index, ShiftPatternStore.Window w) {
+                      LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(this, 16), dp(this, 8), dp(this, 16), dp(this, 8));
+                      box.addView(text(this, "开始", 14, Color.DKGRAY));
+                      LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL);
+                      NumberPicker sh = num(0, 23, w.start / 60), sm = num(0, 59, w.start % 60);
+                      row1.addView(sh, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); row1.addView(sm, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); box.addView(row1);
+                      TextView end = text(this, "结束", 14, Color.DKGRAY); end.setPadding(0, dp(this, 8), 0, 0); box.addView(end);
+                      LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL);
+                      NumberPicker eh = num(0, 23, w.end / 60), em = num(0, 59, w.end % 60);
+                      row2.addView(eh, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); row2.addView(em, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); box.addView(row2);
+                      TextView tip = text(this, "结束早于开始会自动按跨天处理", 12, Color.GRAY); tip.setPadding(0, dp(this, 6), 0, 0); box.addView(tip);
+                      new AlertDialog.Builder(this).setTitle("修改监控时段").setView(box)
+                              .setPositiveButton("保存", (d, which) -> {
+                                  ShiftPatternStore.saveWindow(this, index, sh.getValue() * 60 + sm.getValue(), eh.getValue() * 60 + em.getValue(), w.on);
+                                  render();
+                              }).setNegativeButton("取消", null).show();
                   }
 
-                  @Override
-                  public void onBackPressed() {
+                  private NumberPicker num(int min, int max, int value) {
+                      NumberPicker p = new NumberPicker(this); p.setMinValue(min); p.setMaxValue(max); p.setValue(value); p.setWrapSelectorWheel(true); return p;
+                  }
+
+                  private void pickAnchor() {
+                      Calendar c = Calendar.getInstance(); long a = ShiftPatternStore.getAnchor(this); if (a > 0) c.setTimeInMillis(a);
+                      new DatePickerDialog(this, (view, year, month, day) -> {
+                          Calendar n = Calendar.getInstance(); n.set(year, month, day, 0, 0, 0); n.set(Calendar.MILLISECOND, 0);
+                          ShiftPatternStore.setAnchor(this, n.getTimeInMillis()); render();
+                      }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show();
                   }
               }
           }
           EOF
+
+      - name: Patch MainActivity
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/com/example/feishualarm/MainActivity.java')
+          s = p.read_text(encoding='utf-8')
+
+          def rep(old, new):
+              global s
+              if old not in s:
+                  raise SystemExit('anchor not found: ' + old[:100])
+              s = s.replace(old, new, 1)
+
+          rep(r'''import android.app.Activity;
+import android.app.AlertDialog;''', r'''import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.AlertDialog;''')
+
+          rep(r'''import android.content.Context;
+import android.content.Intent;''', r'''import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;''')
+
+          rep(r'''        enableBox.setOnCheckedChangeListener((v, checked) -> {
+              ScheduleStore.setEnabled(this, checked);
+              if (checked) {
+                  AlarmService.startGuard(this);
+              } else {
+                  AlarmService.stopGuard(this);
+              }
+          });''', r'''        enableBox.setOnCheckedChangeListener((v, checked) -> {
+              ScheduleStore.setEnabled(this, checked);
+              if (checked) {
+                  AlarmService.startGuard(this);
+                  AlarmService.scheduleWatchdog(this);
+              } else {
+                  AlarmService.stopGuard(this);
+                  AlarmService.cancelWatchdog(this);
+              }
+          });''')
+
+          rep(r'''        statusCard.addView(enableBox);
+          root.addView(statusCard);
+
+          LinearLayout permissionCard = card();''', r'''        statusCard.addView(enableBox);
+          root.addView(statusCard);
+
+          LinearLayout toolsCard = card();
+          toolsCard.addView(section("工具"));
+          toolsCard.addView(secondaryButton("权限自检", v ->
+                  startActivity(new Intent(this, Extras.PermissionCheckActivity.class))));
+          toolsCard.addView(secondaryButton("查看触发日志", v ->
+                  startActivity(new Intent(this, Extras.TriggerLogActivity.class))));
+          TextView shiftInfo = new TextView(this);
+          shiftInfo.setText("按白夜休休四天循环自动切换监控时段");
+          shiftInfo.setTextColor(0xFF6B7280);
+          shiftInfo.setTextSize(13);
+          shiftInfo.setPadding(0, dp(this, 8), 0, dp(this, 4));
+          toolsCard.addView(shiftInfo);
+          toolsCard.addView(secondaryButton("白夜休休模板", v ->
+                  startActivity(new Intent(this, Extras.ShiftPatternActivity.class))));
+          root.addView(toolsCard);
+
+          LinearLayout permissionCard = card();''')
+
+          rep(r'''        if (ScheduleStore.isEnabled(this)) {
+              AlarmService.startGuard(this);
+          }''', r'''        if (ScheduleStore.isEnabled(this)) {
+              AlarmService.startGuard(this);
+              AlarmService.scheduleWatchdog(this);
+          }''')
+
+          rep(r'''    public static boolean isActive(Context context, long now) {
+          if (!isEnabled(context)) return false;
+          List<Schedule> schedules = getSchedules(context);
+          if (schedules.isEmpty()) return false;''', r'''    public static boolean isActive(Context context, long now) {
+          if (!isEnabled(context)) return false;
+          if (Extras.ShiftPatternStore.isActive(context, now)) return true;
+          List<Schedule> schedules = getSchedules(context);
+          if (schedules.isEmpty()) return false;''')
+
+          start = s.index('    public static class FeishuNotificationListener')
+          end = s.index('    public static class AlarmService')
+          listener = r'''    public static class FeishuNotificationListener extends android.service.notification.NotificationListenerService {
+          private static final String[] PACKAGES = {
+                  "com.ss.android.lark",
+                  "com.larksuite.suite"
+          };
+
+          public static volatile boolean connected = false;
+
+          @Override
+          public void onListenerConnected() {
+              super.onListenerConnected();
+              connected = true;
+          }
+
+          @Override
+          public void onListenerDisconnected() {
+              super.onListenerDisconnected();
+              connected = false;
+          }
+
+          public static boolean hasAccess(Context context) {
+              String enabled = Settings.Secure.getString(
+                      context.getContentResolver(), "enabled_notification_listeners");
+              return enabled != null && enabled.contains(context.getPackageName());
+          }
+
+          public static void rebind(Context context) {
+              try {
+                  requestRebind(new ComponentName(context, FeishuNotificationListener.class));
+              } catch (Exception ignored) {
+              }
+          }
+
+          @Override
+          public void onNotificationPosted(android.service.notification.StatusBarNotification sbn) {
+              if (sbn == null) return;
+              boolean isFeishu = false;
+              for (String pkg : PACKAGES) {
+                  if (pkg.equals(sbn.getPackageName())) {
+                      isFeishu = true;
+                      break;
+                  }
+              }
+              if (!isFeishu) return;
+              if (!ScheduleStore.isEnabled(this)) return;
+
+              Notification notification = sbn.getNotification();
+              Bundle extras = notification.extras;
+              String title = extras.getString(Notification.EXTRA_TITLE, "飞书消息");
+              String text = extras.getString(Notification.EXTRA_TEXT, "");
+              if (text == null || text.isEmpty()) {
+                  text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条飞书消息");
+              }
+
+              if (!ScheduleStore.isActive(this, System.currentTimeMillis())) {
+                  Extras.TriggerLogStore.log(this, title, text, "不在时段");
+                  return;
+              }
+              if (AlarmService.isRinging) {
+                  Extras.TriggerLogStore.log(this, title, text, "已在响铃");
+                  return;
+              }
+
+              long now = System.currentTimeMillis();
+              long last = ScheduleStore.prefs(this).getLong(ScheduleStore.KEY_LAST_RING, 0);
+              if (now - last < 5000) {
+                  Extras.TriggerLogStore.log(this, title, text, "冷却中");
+                  return;
+              }
+              ScheduleStore.prefs(this).edit().putLong(ScheduleStore.KEY_LAST_RING, now).apply();
+              AlarmService.trigger(this, title, text);
+          }
+      }
+
+      '''
+          s = s[:start] + listener + s[end:]
+
+          rep(r'''        public static volatile boolean isRinging = false;
+
+          private MediaPlayer player;''', r'''        public static volatile boolean isRinging = false;
+          public static volatile boolean guardRunning = false;
+
+          private MediaPlayer player;''')
+
+          rep(r'''        public static void stopGuard(Context context) {
+              context.stopService(new Intent(context, AlarmService.class));
+          }''', r'''        public static void stopGuard(Context context) {
+              context.stopService(new Intent(context, AlarmService.class));
+              cancelWatchdog(context);
+          }''')
+
+          rep(r'''        @Override
+          public void onCreate() {
+              super.onCreate();
+              createChannels();
+              startForeground(ID_GUARD, guardNotification());
+          }''', r'''        public static void scheduleWatchdog(Context context) {
+              try {
+                  AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                  Intent intent = new Intent(context, Extras.WatchdogReceiver.class);
+                  PendingIntent pi = PendingIntent.getBroadcast(context, 1001, intent,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  am.setInexactRepeating(AlarmManager.RTC_WAKEUP,
+                          System.currentTimeMillis() + 15 * 60 * 1000L,
+                          15 * 60 * 1000L, pi);
+              } catch (Exception ignored) {
+              }
+          }
+
+          public static void cancelWatchdog(Context context) {
+              try {
+                  AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                  Intent intent = new Intent(context, Extras.WatchdogReceiver.class);
+                  PendingIntent pi = PendingIntent.getBroadcast(context, 1001, intent,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                  am.cancel(pi);
+                  pi.cancel();
+              } catch (Exception ignored) {
+              }
+          }
+
+          @Override
+          public void onCreate() {
+              super.onCreate();
+              guardRunning = true;
+              createChannels();
+              startForeground(ID_GUARD, guardNotification());
+              scheduleWatchdog(this);
+          }''')
+
+          rep(r'''        public static void trigger(Context context, String title, String text) {
+              Intent intent = new Intent(context, AlarmService.class);''', r'''        public static void trigger(Context context, String title, String text) {
+              Extras.TriggerLogStore.log(context, title, text, "已响铃");
+              Intent intent = new Intent(context, AlarmService.class);''')
+
+          rep(r'''        @Override
+          public void onDestroy() {
+              stopAlarm();
+              super.onDestroy();
+          }''', r'''        @Override
+          public void onDestroy() {
+              guardRunning = false;
+              stopAlarm();
+              super.onDestroy();
+          }''')
+
+          rep(r'''        private void stopAlarm() {
+              AlarmService.stop(this);
+              finish();
+          }''', r'''        private void stopAlarm() {
+              Extras.TriggerLogStore.log(this, "响铃", "用户手动停止", "已停止");
+              AlarmService.stop(this);
+              finish();
+          }''')
+
+          rep(r'''        note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后请打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");''', r'''        note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后会自动恢复监控，但被系统强行停止后需要手动打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");''')
+
+          p.write_text(s, encoding='utf-8')
+          print('MainActivity patched')
+          PY
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
