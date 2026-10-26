@@ -2243,12 +2243,13 @@ jobs:
                   private List<String> extractMessages(Notification notification) {
                       List<String> result = new ArrayList<>();
                       try {
-                          Notification.MessagingStyle style =
-                                  Notification.MessagingStyle.extractMessagingStyleFromNotification(notification);
-                          if (style != null) {
-                              for (Notification.MessagingStyle.Message message : style.getMessages()) {
-                                  CharSequence text = message.getText();
-                                  if (text != null && text.length() > 0) result.add(text.toString());
+                          Parcelable[] raw = notification.extras.getParcelableArray("android.messages");
+                          if (raw != null) {
+                              for (Parcelable item : raw) {
+                                  if (item instanceof Bundle) {
+                                      CharSequence text = ((Bundle) item).getCharSequence("text");
+                                      if (text != null && text.length() > 0) result.add(text.toString());
+                                  }
                               }
                           }
                       } catch (Exception ignored) {}
