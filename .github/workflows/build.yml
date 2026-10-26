@@ -530,12 +530,12 @@ jobs:
                       ImageView icon = new ImageView(this);
                       icon.setLayoutParams(new LinearLayout.LayoutParams(
                               dp(this, 44), dp(this, 44)));
-                      icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                      icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
                       try {
-                          icon.setImageDrawable(pm.getApplicationIcon(entry[1]));
+                          icon.setImageDrawable(Extras.circularIcon(this,
+                                  pm.getApplicationIcon(entry[1]), 44));
                       } catch (Exception ignored) {
                       }
-                      Extras.makeCircular(icon);
                       item.addView(icon);
 
                       TextView name = new TextView(this);
@@ -1710,10 +1710,13 @@ jobs:
           import android.content.pm.PackageManager;
           import android.content.pm.ResolveInfo;
           import android.content.res.ColorStateList;
-          import android.graphics.Outline;
+          import android.graphics.Bitmap;
+          import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.Paint;
+          import android.graphics.Path;
           import android.graphics.Typeface;
+          import android.graphics.drawable.BitmapDrawable;
           import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.RippleDrawable;
@@ -1724,7 +1727,6 @@ jobs:
           import android.view.Gravity;
           import android.view.MotionEvent;
           import android.view.View;
-          import android.view.ViewOutlineProvider;
           import android.widget.*;
           import org.json.JSONArray;
           import org.json.JSONObject;
@@ -1786,17 +1788,21 @@ jobs:
                   return Build.VERSION.SDK_INT < 33 || c.checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
               }
 
-              static void makeCircular(ImageView view) {
-                  GradientDrawable bg = new GradientDrawable();
-                  bg.setShape(GradientDrawable.OVAL);
-                  bg.setColor(Color.WHITE);
-                  view.setBackground(bg);
-                  view.setClipToOutline(true);
-                  view.setOutlineProvider(new ViewOutlineProvider() {
-                      @Override public void getOutline(View v, Outline outline) {
-                          outline.setOval(0, 0, v.getWidth(), v.getHeight());
-                      }
-                  });
+              static Drawable circularIcon(Context c, Drawable d, int sizeDp) {
+                  int size = dp(c, sizeDp);
+                  Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+                  Canvas canvas = new Canvas(bmp);
+                  Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  paint.setColor(Color.WHITE);
+                  canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint);
+                  Path clip = new Path();
+                  clip.addCircle(size / 2f, size / 2f, size / 2f, Path.Direction.CW);
+                  canvas.clipPath(clip);
+                  if (d != null) {
+                      d.setBounds(0, 0, size, size);
+                      d.draw(canvas);
+                  }
+                  return new BitmapDrawable(c.getResources(), bmp);
               }
 
               public static class MonitoredAppsStore {
@@ -1822,12 +1828,17 @@ jobs:
                   private TextView letterBubble;
                   private List<AppEntry> allApps = new ArrayList<>();
                   private final Map<String, View> anchors = new HashMap<>();
+                  private boolean receiverRegistered = false;
+                  private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
+                      @Override public void onReceive(Context context, Intent intent) { loadApps(); }
+                  };
 
                   static class AppEntry {
                       String pkg;
                       String label;
                       String initial;
                       long size;
+                      Drawable icon;
                   }
 
                   static class IndexBar extends View {
@@ -1848,7 +1859,7 @@ jobs:
 
                       void setListener(Listener l) { listener = l; }
 
-                      @Override protected void onDraw(android.graphics.Canvas canvas) {
+                      @Override protected void onDraw(Canvas canvas) {
                           super.onDraw(canvas);
                           int h = getHeight();
                           if (h <= 0) return;
@@ -1981,7 +1992,26 @@ jobs:
 
                   @Override protected void onResume() {
                       super.onResume();
+                      IntentFilter filter = new IntentFilter();
+                      filter.addAction(Intent.ACTION_PACKAGE_ADDED);
+                      filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
+                      filter.addAction(Intent.ACTION_PACKAGE_REPLACED);
+                      filter.addDataScheme("package");
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          registerReceiver(packageReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                      } else {
+                          registerReceiver(packageReceiver, filter);
+                      }
+                      receiverRegistered = true;
                       loadApps();
+                  }
+
+                  @Override protected void onPause() {
+                      if (receiverRegistered) {
+                          try { unregisterReceiver(packageReceiver); } catch (Exception ignored) {}
+                          receiverRegistered = false;
+                      }
+                      super.onPause();
                   }
 
                   private void showBubble(String letter, float y) {
@@ -2025,6 +2055,7 @@ jobs:
                           AppEntry e = new AppEntry();
                           e.pkg = pkg;
                           e.label = ri.loadLabel(pm).toString();
+                          e.icon = circularIcon(this, ri.loadIcon(pm), 44);
                           e.initial = initialOf(e.label);
                           try {
                               e.size = new File(ri.activityInfo.applicationInfo.sourceDir).length();
@@ -2088,7 +2119,6 @@ jobs:
                       if (listContainer == null) return;
                       listContainer.removeAllViews();
                       anchors.clear();
-                      PackageManager pm = getPackageManager();
                       String q = search.getText().toString().trim().toLowerCase(Locale.CHINA);
                       int shown = 0;
                       for (AppEntry app : allApps) {
@@ -2101,13 +2131,9 @@ jobs:
                           row.setPadding(0, dp(this, 8), dp(this, 4), dp(this, 8));
 
                           ImageView icon = new ImageView(this);
-                          icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                          icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
                           row.addView(icon, new LinearLayout.LayoutParams(dp(this, 44), dp(this, 44)));
-                          try {
-                              icon.setImageDrawable(pm.getApplicationIcon(app.pkg));
-                          } catch (Exception ignored) {
-                          }
-                          makeCircular(icon);
+                          icon.setImageDrawable(app.icon);
 
                           LinearLayout textBox = new LinearLayout(this);
                           textBox.setOrientation(LinearLayout.VERTICAL);
