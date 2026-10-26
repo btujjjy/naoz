@@ -1,4 +1,4 @@
-name: Build Feishu Alarm APK
+name: Build Duty Alarm APK
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "FeishuAlarm"
+          rootProject.name = "DutyAlarm"
           include ':app'
           EOF
 
@@ -85,7 +85,7 @@ jobs:
 
               <application
                   android:allowBackup="true"
-                  android:label="飞书夜班铃声"
+                  android:label="夜班值守铃声"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
                   <activity
@@ -111,7 +111,7 @@ jobs:
                       android:foregroundServiceType="specialUse">
                       <property
                           android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="feishu alarm guard" />
+                          android:value="notification alarm guard" />
                   </service>
 
                   <service
@@ -191,6 +191,7 @@ jobs:
 
               private LinearLayout scheduleList;
               private LinearLayout permissionContainer;
+              private TextView appsSummary;
               private Spinner ringtoneSpinner;
               private List<RingtoneHelper.Option> builtIn;
               private TextView customLabel;
@@ -223,22 +224,33 @@ jobs:
                   scroll.addView(root);
 
                   TextView title = new TextView(this);
-                  title.setText("飞书夜班铃声");
+                  title.setText("夜班值守铃声");
                   title.setTextColor(0xFF1E2430);
                   title.setTextSize(28);
                   title.setGravity(Gravity.START);
                   root.addView(title);
 
                   TextView subtitle = new TextView(this);
-                  subtitle.setText("夜班消息提醒 · 只在设定时间响铃");
+                  subtitle.setText("应用消息提醒 · 只在设定时间响铃");
                   subtitle.setTextColor(0xFF6B7280);
                   subtitle.setTextSize(13);
                   subtitle.setPadding(0, dp(this, 4), 0, dp(this, 16));
                   root.addView(subtitle);
 
+                  LinearLayout appsCard = card();
+                  appsCard.addView(section("监控的应用"));
+                  appsSummary = new TextView(this);
+                  appsSummary.setTextColor(0xFF1F2937);
+                  appsSummary.setTextSize(14);
+                  appsSummary.setPadding(0, dp(this, 2), 0, dp(this, 8));
+                  appsCard.addView(appsSummary);
+                  appsCard.addView(primaryButton("选择要监控的应用", v ->
+                          startActivity(new Intent(this, Extras.AppPickerActivity.class))));
+                  root.addView(appsCard);
+
                   LinearLayout statusCard = card();
                   enableBox = new CheckBox(this);
-                  enableBox.setText("启用飞书响铃");
+                  enableBox.setText("启用响铃监控");
                   enableBox.setTextColor(0xFF1E2430);
                   enableBox.setTextSize(16);
                   enableBox.setPadding(0, dp(this, 4), 0, 0);
@@ -272,7 +284,7 @@ jobs:
                   permissionCard.addView(permTitle);
 
                   TextView permSub = new TextView(this);
-                  permSub.setText("全部绿灯，飞书消息才不会被系统拦掉");
+                  permSub.setText("全部绿灯，应用消息才不会被系统拦掉");
                   permSub.setTextColor(0xFF6B7280);
                   permSub.setTextSize(13);
                   permSub.setPadding(0, 0, 0, dp(this, 4));
@@ -340,7 +352,7 @@ jobs:
                   testCard.addView(secondaryButton("查看触发日志", v ->
                           startActivity(new Intent(this, Extras.TriggerLogActivity.class))));
                   TextView note = new TextView(this);
-                  note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后会自动恢复监控，但被系统强行停止后需要手动打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");
+                  note.setText("说明：需要允许通知使用权；被监控的应用不能被静音；手机重启后会自动恢复监控，但被系统强行停止后需要手动打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");
                   note.setTextColor(0xFF6B7280);
                   note.setTextSize(12);
                   note.setPadding(0, dp(this, 16), 0, 0);
@@ -349,6 +361,7 @@ jobs:
 
                   setContentView(scroll);
                   updateRingtoneLabel();
+                  updateAppsSummary();
                   renderPermissionChecks();
               }
 
@@ -476,11 +489,16 @@ jobs:
                   });
               }
 
+              private void updateAppsSummary() {
+                  if (appsSummary == null) return;
+                  appsSummary.setText(Extras.MonitoredAppsStore.summary(this));
+              }
+
               private void renderPermissionChecks() {
                   if (permissionContainer == null) return;
                   permissionContainer.removeAllViews();
-                  addPermissionRow("通知使用权", "读取飞书通知的钥匙，升级后要重新勾选一次",
-                          Extras.FeishuListener.hasAccess(this), "去开启",
+                  addPermissionRow("通知使用权", "读取应用通知的钥匙，升级后要重新勾选一次",
+                          Extras.NotifyListener.hasAccess(this), "去开启",
                           v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)), null);
                   addPermissionRow("通知权限", "Android 13 以上要允许本 App 发通知",
                           Extras.notificationsEnabled(this), "去开启", v -> {
@@ -761,6 +779,7 @@ jobs:
               @Override
               protected void onResume() {
                   super.onResume();
+                  updateAppsSummary();
                   renderPermissionChecks();
                   if (ScheduleStore.isEnabled(this)) {
                       AlarmService.startGuard(this);
@@ -961,48 +980,11 @@ jobs:
                   }
               }
 
-              public static class FeishuNotificationListener extends android.service.notification.NotificationListenerService {
-                  private static final String[] PACKAGES = {
-                          "com.ss.android.lark",
-                          "com.larksuite.suite"
-                  };
-
-                  @Override
-                  public void onNotificationPosted(android.service.notification.StatusBarNotification sbn) {
-                      if (sbn == null) return;
-                      boolean isFeishu = false;
-                      for (String pkg : PACKAGES) {
-                          if (pkg.equals(sbn.getPackageName())) {
-                              isFeishu = true;
-                              break;
-                          }
-                      }
-                      if (!isFeishu) return;
-                      if (!ScheduleStore.isEnabled(this)) return;
-                      if (!ScheduleStore.isActive(this, System.currentTimeMillis())) return;
-                      if (AlarmService.isRinging) return;
-
-                      long now = System.currentTimeMillis();
-                      long last = ScheduleStore.prefs(this).getLong(ScheduleStore.KEY_LAST_RING, 0);
-                      if (now - last < 5000) return;
-                      ScheduleStore.prefs(this).edit().putLong(ScheduleStore.KEY_LAST_RING, now).apply();
-
-                      Notification notification = sbn.getNotification();
-                      Bundle extras = notification.extras;
-                      String title = extras.getString(Notification.EXTRA_TITLE, "飞书消息");
-                      String text = extras.getString(Notification.EXTRA_TEXT, "");
-                      if (text == null || text.isEmpty()) {
-                          text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条飞书消息");
-                      }
-                      AlarmService.trigger(this, title, text);
-                  }
-              }
-
               public static class AlarmService extends Service {
                   public static final String ACTION_TRIGGER = "com.example.feishualarm.TRIGGER";
                   public static final String ACTION_STOP = "com.example.feishualarm.STOP";
-                  private static final String CHANNEL_GUARD = "feishu_guard";
-                  private static final String CHANNEL_ALARM = "feishu_alarm";
+                  private static final String CHANNEL_GUARD = "duty_guard";
+                  private static final String CHANNEL_ALARM = "duty_alarm";
                   private static final int ID_GUARD = 1;
                   private static final int ID_ALARM = 2;
 
@@ -1015,7 +997,7 @@ jobs:
                   private int originalVolume = -1;
                   private Handler volumeHandler;
                   private Runnable volumeGuard;
-                  private String title = "飞书消息";
+                  private String title = "应用消息";
                   private String text = "";
 
                   public static void startGuard(Context context) {
@@ -1132,7 +1114,7 @@ jobs:
                       }
 
                       PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FeishuAlarm::Ring");
+                      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DutyAlarm::Ring");
                       wakeLock.acquire();
                       startVolumeGuard();
                   }
@@ -1213,11 +1195,11 @@ jobs:
                   private void createChannels() {
                       NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
                       NotificationChannel guard = new NotificationChannel(
-                              CHANNEL_GUARD, "飞书铃声守护", NotificationManager.IMPORTANCE_LOW);
+                              CHANNEL_GUARD, "铃声守护", NotificationManager.IMPORTANCE_LOW);
                       nm.createNotificationChannel(guard);
 
                       NotificationChannel alarm = new NotificationChannel(
-                              CHANNEL_ALARM, "飞书响铃", NotificationManager.IMPORTANCE_HIGH);
+                              CHANNEL_ALARM, "响铃提醒", NotificationManager.IMPORTANCE_HIGH);
                       alarm.setSound(null, null);
                       alarm.enableVibration(false);
                       nm.createNotificationChannel(alarm);
@@ -1229,8 +1211,8 @@ jobs:
                               PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
                       return new Notification.Builder(this, CHANNEL_GUARD)
                               .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                              .setContentTitle("飞书夜班铃声")
-                              .setContentText("正在监听飞书消息")
+                              .setContentTitle("夜班值守铃声")
+                              .setContentText("正在监听应用消息")
                               .setOngoing(true)
                               .setContentIntent(pi)
                               .build();
@@ -1244,7 +1226,7 @@ jobs:
                               PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
                       return new Notification.Builder(this, CHANNEL_ALARM)
                               .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                              .setContentTitle("飞书消息")
+                              .setContentTitle("应用消息")
                               .setContentText(title)
                               .setCategory(Notification.CATEGORY_ALARM)
                               .setPriority(Notification.PRIORITY_MAX)
@@ -1294,7 +1276,7 @@ jobs:
 
                       String title = getIntent().getStringExtra("title");
                       String text = getIntent().getStringExtra("text");
-                      if (title == null) title = "飞书消息";
+                      if (title == null) title = "应用消息";
                       if (text == null) text = "";
 
                       LinearLayout root = new LinearLayout(this);
@@ -1317,7 +1299,7 @@ jobs:
                       card.setElevation(0);
 
                       TextView label = new TextView(this);
-                      label.setText("飞书消息");
+                      label.setText("应用消息");
                       label.setTextColor(0xFFDC2626);
                       label.setTextSize(15);
                       label.setGravity(Gravity.CENTER);
@@ -1444,10 +1426,11 @@ jobs:
               <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
               <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
               <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
               <application
                   android:allowBackup="true"
-                  android:label="飞书夜班铃声"
+                  android:label="夜班值守铃声"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
                   <activity
@@ -1468,6 +1451,9 @@ jobs:
                       android:turnScreenOn="true" />
 
                   <activity
+                      android:name=".Extras$AppPickerActivity"
+                      android:exported="false" />
+                  <activity
                       android:name=".Extras$TriggerLogActivity"
                       android:exported="false" />
 
@@ -1477,11 +1463,11 @@ jobs:
                       android:foregroundServiceType="specialUse">
                       <property
                           android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="feishu alarm guard" />
+                          android:value="notification alarm guard" />
                   </service>
 
                   <service
-                      android:name=".Extras$FeishuListener"
+                      android:name=".Extras$NotifyListener"
                       android:exported="false"
                       android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
                       <intent-filter>
@@ -1515,8 +1501,10 @@ jobs:
           import android.app.*;
           import android.content.*;
           import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
           import android.content.res.ColorStateList;
           import android.graphics.Color;
+          import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.RippleDrawable;
           import android.net.Uri;
@@ -1528,7 +1516,7 @@ jobs:
           import android.widget.*;
           import org.json.JSONArray;
           import org.json.JSONObject;
-          import java.text.SimpleDateFormat;
+          import java.text.*;
           import java.util.*;
 
           public class Extras {
@@ -1585,11 +1573,174 @@ jobs:
                   return Build.VERSION.SDK_INT < 33 || c.checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
               }
 
-              public static class FeishuListener extends android.service.notification.NotificationListenerService {
-                  private static final String[] PACKAGES = {
-                          "com.ss.android.lark",
-                          "com.larksuite.suite"
+              public static class MonitoredAppsStore {
+                  private static final String KEY = "monitored_apps";
+                  static SharedPreferences prefs(Context c) { return MainActivity.ScheduleStore.prefs(c); }
+                  public static Set<String> get(Context c) {
+                      return new HashSet<>(prefs(c).getStringSet(KEY, new HashSet<String>()));
+                  }
+                  public static boolean isSelected(Context c, String pkg) { return get(c).contains(pkg); }
+                  public static void setSelected(Context c, String pkg, boolean selected) {
+                      Set<String> set = get(c);
+                      if (selected) set.add(pkg); else set.remove(pkg);
+                      prefs(c).edit().putStringSet(KEY, set).apply();
+                  }
+                  public static String summary(Context c) {
+                      Set<String> set = get(c);
+                      if (set.isEmpty()) return "还没有选择应用，点下面按钮去勾选";
+                      PackageManager pm = c.getPackageManager();
+                      List<String> names = new ArrayList<>();
+                      for (String pkg : set) {
+                          try {
+                              names.add(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString());
+                          } catch (Exception ignored) {}
+                      }
+                      if (names.isEmpty()) return "已选应用已卸载，请重新选择";
+                      Collections.sort(names, Collator.getInstance(Locale.CHINA));
+                      StringBuilder sb = new StringBuilder("已选 " + names.size() + " 个：");
+                      int max = Math.min(names.size(), 4);
+                      for (int i = 0; i < max; i++) {
+                          if (i > 0) sb.append("、");
+                          sb.append(names.get(i));
+                      }
+                      if (names.size() > max) sb.append(" 等");
+                      return sb.toString();
+                  }
+              }
+
+              public static class AppPickerActivity extends Activity {
+                  private LinearLayout listContainer;
+                  private EditText search;
+                  private List<AppEntry> allApps = new ArrayList<>();
+                  private boolean receiverRegistered = false;
+                  private final BroadcastReceiver packageReceiver = new BroadcastReceiver() {
+                      @Override public void onReceive(Context context, Intent intent) { loadApps(); }
                   };
+
+                  static class AppEntry {
+                      String pkg;
+                      String label;
+                      Drawable icon;
+                  }
+
+                  @Override protected void onCreate(Bundle b) {
+                      super.onCreate(b);
+                      ScrollView page = new ScrollView(this);
+                      LinearLayout root = new LinearLayout(this);
+                      root.setOrientation(LinearLayout.VERTICAL);
+                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
+                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
+                      root.addView(text(this, "选择要监控的应用", 26, 0xFF1E2430));
+                      TextView sub = text(this, "勾选后，这些应用的通知会在设定时间段响铃", 13, 0xFF6B7280);
+                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
+
+                      search = new EditText(this);
+                      search.setHint("搜索应用");
+                      search.setSingleLine(true);
+                      search.setTextSize(14);
+                      search.setPadding(dp(this, 12), 0, dp(this, 12), 0);
+                      GradientDrawable searchBg = new GradientDrawable();
+                      searchBg.setColor(0xFFFFFFFF);
+                      searchBg.setCornerRadius(dp(this, 14));
+                      searchBg.setStroke(dp(this, 1), 0xFFE2E8F0);
+                      search.setBackground(searchBg);
+                      LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(
+                              LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 46));
+                      searchParams.bottomMargin = dp(this, 12);
+                      root.addView(search, searchParams);
+                      search.addTextChangedListener(new android.text.TextWatcher() {
+                          @Override public void afterTextChanged(android.text.Editable s) { renderList(); }
+                          @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                          @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+                      });
+
+                      listContainer = new LinearLayout(this);
+                      listContainer.setOrientation(LinearLayout.VERTICAL);
+                      root.addView(listContainer);
+
+                      Button done = button(this, "完成", true);
+                      done.setOnClickListener(v -> finish());
+                      root.addView(done, params(this, true));
+                      page.addView(root);
+                      setContentView(page);
+                      loadApps();
+                  }
+
+                  @Override protected void onResume() {
+                      super.onResume();
+                      IntentFilter filter = new IntentFilter();
+                      filter.addAction(Intent.ACTION_PACKAGE_ADDED);
+                      filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
+                      filter.addAction(Intent.ACTION_PACKAGE_REPLACED);
+                      filter.addDataScheme("package");
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          registerReceiver(packageReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+                      } else {
+                          registerReceiver(packageReceiver, filter);
+                      }
+                      receiverRegistered = true;
+                      loadApps();
+                  }
+
+                  @Override protected void onPause() {
+                      if (receiverRegistered) {
+                          try { unregisterReceiver(packageReceiver); } catch (Exception ignored) {}
+                          receiverRegistered = false;
+                      }
+                      super.onPause();
+                  }
+
+                  private void loadApps() {
+                      PackageManager pm = getPackageManager();
+                      Intent intent = new Intent(Intent.ACTION_MAIN, null);
+                      intent.addCategory(Intent.CATEGORY_LAUNCHER);
+                      List<ResolveInfo> infos = pm.queryIntentActivities(intent, 0);
+                      List<AppEntry> apps = new ArrayList<>();
+                      Set<String> seen = new HashSet<>();
+                      for (ResolveInfo ri : infos) {
+                          String pkg = ri.activityInfo.packageName;
+                          if (pkg.equals(getPackageName()) || seen.contains(pkg)) continue;
+                          seen.add(pkg);
+                          AppEntry e = new AppEntry();
+                          e.pkg = pkg;
+                          e.label = ri.loadLabel(pm).toString();
+                          e.icon = ri.loadIcon(pm);
+                          apps.add(e);
+                      }
+                      final Collator collator = Collator.getInstance(Locale.CHINA);
+                      Collections.sort(apps, (a, b) -> collator.compare(a.label, b.label));
+                      allApps = apps;
+                      renderList();
+                  }
+
+                  private void renderList() {
+                      if (listContainer == null) return;
+                      listContainer.removeAllViews();
+                      String q = search.getText().toString().trim().toLowerCase(Locale.CHINA);
+                      int shown = 0;
+                      for (AppEntry app : allApps) {
+                          if (!q.isEmpty() && !app.label.toLowerCase(Locale.CHINA).contains(q)) continue;
+                          CheckBox box = new CheckBox(this);
+                          box.setText(app.label);
+                          box.setTextSize(14);
+                          box.setTextColor(0xFF1F2937);
+                          box.setChecked(MonitoredAppsStore.isSelected(this, app.pkg));
+                          box.setCompoundDrawablesWithIntrinsicBounds(app.icon, null, null, null);
+                          box.setCompoundDrawablePadding(dp(this, 12));
+                          box.setPadding(0, dp(this, 8), 0, dp(this, 8));
+                          box.setOnCheckedChangeListener((v, checked) -> MonitoredAppsStore.setSelected(this, app.pkg, checked));
+                          listContainer.addView(box);
+                          shown++;
+                      }
+                      if (shown == 0) {
+                          TextView empty = text(this, "没有匹配的应用", 13, 0xFF6B7280);
+                          empty.setPadding(0, dp(this, 12), 0, dp(this, 12));
+                          listContainer.addView(empty);
+                      }
+                  }
+              }
+
+              public static class NotifyListener extends android.service.notification.NotificationListenerService {
                   public static volatile boolean connected = false;
 
                   @Override public void onListenerConnected() {
@@ -1600,27 +1751,36 @@ jobs:
 
                   public static boolean hasAccess(Context c) {
                       String enabled = Settings.Secure.getString(c.getContentResolver(), "enabled_notification_listeners");
-                      return enabled != null && enabled.contains(FeishuListener.class.getName());
+                      return enabled != null && enabled.contains(NotifyListener.class.getName());
                   }
 
                   public static void rebind(Context c) {
-                      try { requestRebind(new ComponentName(c, FeishuListener.class)); } catch (Exception ignored) {}
+                      try { requestRebind(new ComponentName(c, NotifyListener.class)); } catch (Exception ignored) {}
                   }
 
                   @Override public void onNotificationPosted(StatusBarNotification sbn) {
                       if (sbn == null) return;
-                      boolean feishu = false;
-                      for (String pkg : PACKAGES) {
-                          if (pkg.equals(sbn.getPackageName())) { feishu = true; break; }
-                      }
-                      if (!feishu) return;
+                      String pkg = sbn.getPackageName();
+                      if (pkg.equals(getPackageName())) return;
                       if (!MainActivity.ScheduleStore.isEnabled(this)) return;
+                      if (!MonitoredAppsStore.isSelected(this, pkg)) return;
 
                       Notification notification = sbn.getNotification();
+                      if (notification == null) return;
+                      int flags = notification.flags;
+                      if ((flags & Notification.FLAG_ONGOING_EVENT) != 0) return;
+                      if ((flags & Notification.FLAG_FOREGROUND_SERVICE) != 0) return;
+                      if ((flags & Notification.FLAG_GROUP_SUMMARY) != 0) return;
+
                       Bundle extras = notification.extras;
-                      String title = extras.getString(Notification.EXTRA_TITLE, "飞书消息");
+                      String fallback = "应用消息";
+                      try {
+                          fallback = getPackageManager().getApplicationLabel(
+                                  getPackageManager().getApplicationInfo(pkg, 0)).toString();
+                      } catch (Exception ignored) {}
+                      String title = extras.getString(Notification.EXTRA_TITLE, fallback);
                       String text = extras.getString(Notification.EXTRA_TEXT, "");
-                      if (text == null || text.isEmpty()) text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条飞书消息");
+                      if (text == null || text.isEmpty()) text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条新消息");
 
                       long now = System.currentTimeMillis();
                       if (!MainActivity.ScheduleStore.isActive(this, now)) {
@@ -1670,22 +1830,22 @@ jobs:
                   @Override public void onReceive(Context context, Intent intent) {
                       if (!MainActivity.ScheduleStore.isEnabled(context)) return;
                       schedule(context);
-                      if (!FeishuListener.hasAccess(context)) {
-                          notify(context, "通知使用权被关闭了，飞书消息不会再响铃。点此去开启。");
+                      if (!NotifyListener.hasAccess(context)) {
+                          notify(context, "通知使用权被关闭了，应用消息不会再响铃。点此去开启。");
                           return;
                       }
-                      if (!FeishuListener.connected) FeishuListener.rebind(context);
+                      if (!NotifyListener.connected) NotifyListener.rebind(context);
                       try { MainActivity.AlarmService.startGuard(context); } catch (Exception ignored) {}
                   }
                   private void notify(Context context, String msg) {
                       try {
                           NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-                          nm.createNotificationChannel(new NotificationChannel("feishu_watchdog", "监控异常提醒", NotificationManager.IMPORTANCE_DEFAULT));
+                          nm.createNotificationChannel(new NotificationChannel("duty_watchdog", "监控异常提醒", NotificationManager.IMPORTANCE_DEFAULT));
                           Intent open = new Intent(context, MainActivity.class);
                           PendingIntent pi = PendingIntent.getActivity(context, 12, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-                          Notification n = new Notification.Builder(context, "feishu_watchdog")
+                          Notification n = new Notification.Builder(context, "duty_watchdog")
                                   .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                                  .setContentTitle("飞书监控异常")
+                                  .setContentTitle("监控异常")
                                   .setContentText(msg)
                                   .setStyle(new Notification.BigTextStyle().bigText(msg))
                                   .setContentIntent(pi).setAutoCancel(true).build();
@@ -1744,7 +1904,7 @@ jobs:
                       root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
                       root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
                       root.addView(text(this, "触发日志", 26, 0xFF1E2430));
-                      TextView sub = text(this, "最近 50 条飞书通知的处理结果", 13, 0xFF6B7280);
+                      TextView sub = text(this, "最近 50 条通知的处理结果", 13, 0xFF6B7280);
                       sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
                       List<TriggerLogStore.Entry> logs = TriggerLogStore.getLogs(this);
                       if (logs.isEmpty()) root.addView(text(this, "还没有记录", 13, 0xFF6B7280));
@@ -1780,5 +1940,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: feishu-alarm-apk
+          name: duty-alarm-apk
           path: app/build/outputs/apk/debug/app-debug.apk
