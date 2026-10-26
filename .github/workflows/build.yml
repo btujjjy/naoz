@@ -161,6 +161,7 @@ jobs:
           import android.os.VibrationEffect;
           import android.os.Vibrator;
           import android.provider.Settings;
+          import android.text.TextUtils;
           import android.view.Gravity;
           import android.view.HapticFeedbackConstants;
           import android.view.KeyEvent;
@@ -171,6 +172,8 @@ jobs:
           import android.widget.ArrayAdapter;
           import android.widget.Button;
           import android.widget.CheckBox;
+          import android.widget.HorizontalScrollView;
+          import android.widget.ImageView;
           import android.widget.LinearLayout;
           import android.widget.NumberPicker;
           import android.widget.ScrollView;
@@ -183,15 +186,18 @@ jobs:
           import java.io.FileOutputStream;
           import java.io.InputStream;
           import java.io.OutputStream;
+          import java.text.Collator;
           import java.util.ArrayList;
           import java.util.Calendar;
+          import java.util.Collections;
           import java.util.List;
+          import java.util.Set;
 
           public class MainActivity extends Activity {
 
               private LinearLayout scheduleList;
               private LinearLayout permissionContainer;
-              private TextView appsSummary;
+              private LinearLayout appsPreview;
               private Spinner ringtoneSpinner;
               private List<RingtoneHelper.Option> builtIn;
               private TextView customLabel;
@@ -239,11 +245,13 @@ jobs:
 
                   LinearLayout appsCard = card();
                   appsCard.addView(section("监控的应用"));
-                  appsSummary = new TextView(this);
-                  appsSummary.setTextColor(0xFF1F2937);
-                  appsSummary.setTextSize(14);
-                  appsSummary.setPadding(0, dp(this, 2), 0, dp(this, 8));
-                  appsCard.addView(appsSummary);
+                  HorizontalScrollView appRowScroll = new HorizontalScrollView(this);
+                  appRowScroll.setHorizontalScrollBarEnabled(false);
+                  appsPreview = new LinearLayout(this);
+                  appsPreview.setOrientation(LinearLayout.HORIZONTAL);
+                  appsPreview.setPadding(0, dp(this, 2), 0, dp(this, 8));
+                  appRowScroll.addView(appsPreview);
+                  appsCard.addView(appRowScroll);
                   appsCard.addView(primaryButton("选择要监控的应用", v ->
                           startActivity(new Intent(this, Extras.AppPickerActivity.class))));
                   root.addView(appsCard);
@@ -356,7 +364,7 @@ jobs:
 
                   setContentView(scroll);
                   updateRingtoneLabel();
-                  updateAppsSummary();
+                  renderSelectedApps();
                   renderPermissionChecks();
               }
 
@@ -484,9 +492,62 @@ jobs:
                   });
               }
 
-              private void updateAppsSummary() {
-                  if (appsSummary == null) return;
-                  appsSummary.setText(Extras.MonitoredAppsStore.summary(this));
+              private void renderSelectedApps() {
+                  if (appsPreview == null) return;
+                  appsPreview.removeAllViews();
+                  Set<String> selected = Extras.MonitoredAppsStore.get(this);
+                  if (selected.isEmpty()) {
+                      TextView empty = new TextView(this);
+                      empty.setText("还没有选择应用");
+                      empty.setTextColor(0xFF6B7280);
+                      empty.setTextSize(13);
+                      empty.setPadding(0, dp(this, 4), 0, dp(this, 4));
+                      appsPreview.addView(empty);
+                      return;
+                  }
+
+                  PackageManager pm = getPackageManager();
+                  List<String[]> entries = new ArrayList<>();
+                  for (String pkg : selected) {
+                      try {
+                          String label = pm.getApplicationLabel(
+                                  pm.getApplicationInfo(pkg, 0)).toString();
+                          entries.add(new String[]{label, pkg});
+                      } catch (Exception ignored) {
+                      }
+                  }
+                  Collections.sort(entries, (a, b) ->
+                          Collator.getInstance(java.util.Locale.CHINA).compare(a[0], b[0]));
+
+                  for (String[] entry : entries) {
+                      LinearLayout item = new LinearLayout(this);
+                      item.setOrientation(LinearLayout.VERTICAL);
+                      item.setGravity(Gravity.CENTER);
+                      LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
+                              dp(this, 64), LinearLayout.LayoutParams.WRAP_CONTENT);
+                      itemParams.rightMargin = dp(this, 12);
+
+                      ImageView icon = new ImageView(this);
+                      icon.setLayoutParams(new LinearLayout.LayoutParams(
+                              dp(this, 44), dp(this, 44)));
+                      icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                      try {
+                          icon.setImageDrawable(pm.getApplicationIcon(entry[1]));
+                      } catch (Exception ignored) {
+                      }
+                      item.addView(icon);
+
+                      TextView name = new TextView(this);
+                      name.setText(entry[0]);
+                      name.setTextColor(0xFF4B5563);
+                      name.setTextSize(11);
+                      name.setGravity(Gravity.CENTER);
+                      name.setMaxLines(1);
+                      name.setEllipsize(TextUtils.TruncateAt.END);
+                      name.setPadding(0, dp(this, 3), 0, 0);
+                      item.addView(name);
+                      appsPreview.addView(item, itemParams);
+                  }
               }
 
               private void renderPermissionChecks() {
@@ -542,13 +603,10 @@ jobs:
 
               private void addPermissionRow(String title, String desc, boolean ok,
                                             String action, View.OnClickListener listener, String override) {
-                  if (permissionContainer.getChildCount() > 0) {
-                      View divider = new View(this);
-                      divider.setBackgroundColor(0xFFE5E7EB);
-                      LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
-                              LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 1));
-                      permissionContainer.addView(divider, dlp);
-                  }
+                  View divider = new View(this);
+                  divider.setBackgroundColor(0xFFE5E7EB);
+                  permissionContainer.addView(divider, new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, dp(this, 1)));
 
                   LinearLayout row = new LinearLayout(this);
                   row.setOrientation(LinearLayout.VERTICAL);
@@ -774,7 +832,7 @@ jobs:
               @Override
               protected void onResume() {
                   super.onResume();
-                  updateAppsSummary();
+                  renderSelectedApps();
                   renderPermissionChecks();
                   if (ScheduleStore.isEnabled(this)) {
                       AlarmService.startGuard(this);
