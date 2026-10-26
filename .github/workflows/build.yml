@@ -191,6 +191,7 @@ jobs:
 
               private TextView status;
               private LinearLayout scheduleList;
+              private LinearLayout permissionContainer;
               private Spinner ringtoneSpinner;
               private List<RingtoneHelper.Option> builtIn;
               private TextView customLabel;
@@ -253,40 +254,32 @@ jobs:
                       ScheduleStore.setEnabled(this, checked);
                       if (checked) {
                           AlarmService.startGuard(this);
+                          Extras.WatchdogReceiver.schedule(this);
                       } else {
                           AlarmService.stopGuard(this);
+                          Extras.WatchdogReceiver.cancel(this);
                       }
                   });
                   statusCard.addView(enableBox);
                   root.addView(statusCard);
 
-                  LinearLayout permissionCard = card();
-                  permissionCard.addView(section("权限"));
-                  permissionCard.addView(secondaryButton("通知使用权", v ->
-                          startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      permissionCard.addView(secondaryButton("全屏通知权限", v -> {
-                          try {
-                              startActivity(new Intent(
-                                      Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
-                                      Uri.parse("package:" + getPackageName())));
-                          } catch (Exception e) {
-                              toast("请到系统设置里允许全屏通知");
-                          }
-                      }));
-                  }
-                  permissionCard.addView(secondaryButton("电池优化白名单", v -> {
-                      try {
-                          startActivity(new Intent(
-                                  Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                  Uri.parse("package:" + getPackageName())));
-                      } catch (Exception e) {
-                          toast("请到系统设置里关闭电池优化");
-                      }
-                  }));
-                  permissionCard.addView(secondaryButton("勿扰访问权限", v ->
-                          startActivity(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))));
-                  root.addView(permissionCard);
+                  TextView permTitle = new TextView(this);
+                  permTitle.setText("权限自检");
+                  permTitle.setTextColor(0xFF1E2430);
+                  permTitle.setTextSize(20);
+                  permTitle.setPadding(0, dp(this, 8), 0, dp(this, 2));
+                  root.addView(permTitle);
+
+                  TextView permSub = new TextView(this);
+                  permSub.setText("全部绿灯，飞书消息才不会被系统拦掉");
+                  permSub.setTextColor(0xFF6B7280);
+                  permSub.setTextSize(13);
+                  permSub.setPadding(0, 0, 0, dp(this, 10));
+                  root.addView(permSub);
+
+                  permissionContainer = new LinearLayout(this);
+                  permissionContainer.setOrientation(LinearLayout.VERTICAL);
+                  root.addView(permissionContainer);
 
                   LinearLayout ringCard = card();
                   ringCard.addView(section("铃声"));
@@ -342,8 +335,10 @@ jobs:
                   testCard.addView(section("测试"));
                   testCard.addView(primaryButton("测试响铃", v ->
                           AlarmService.trigger(this, "测试消息", "这是测试铃声")));
+                  testCard.addView(secondaryButton("查看触发日志", v ->
+                          startActivity(new Intent(this, Extras.TriggerLogActivity.class))));
                   TextView note = new TextView(this);
-                  note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后请打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");
+                  note.setText("说明：需要允许通知使用权；飞书不能被静音；手机重启后会自动恢复监控，但被系统强行停止后需要手动打开一次本 App。安卓不允许任何 App 阻止强制停止、重启或音量键。");
                   note.setTextColor(0xFF6B7280);
                   note.setTextSize(12);
                   note.setPadding(0, dp(this, 16), 0, 0);
@@ -352,6 +347,7 @@ jobs:
 
                   setContentView(scroll);
                   updateRingtoneLabel();
+                  renderPermissionChecks();
               }
 
               private LinearLayout card() {
@@ -476,6 +472,92 @@ jobs:
                       }
                       return false;
                   });
+              }
+
+              private void renderPermissionChecks() {
+                  if (permissionContainer == null) return;
+                  permissionContainer.removeAllViews();
+                  addPermissionRow("通知使用权", "读取飞书通知的钥匙，升级后要重新勾选一次",
+                          Extras.FeishuListener.hasAccess(this), "去开启",
+                          v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)), null);
+                  addPermissionRow("通知权限", "Android 13 以上要允许本 App 发通知",
+                          Extras.notificationsEnabled(this), "去开启", v -> {
+                              if (Build.VERSION.SDK_INT >= 33) {
+                                  requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 2);
+                              } else {
+                                  startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                          .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+                              }
+                          }, null);
+                  addPermissionRow("电池优化白名单", "防止系统把后台监控杀掉",
+                          Extras.ignoringBattery(this), "去设置", v -> {
+                              try {
+                                  startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                          Uri.parse("package:" + getPackageName())));
+                              } catch (Exception e) {
+                                  toast("请到系统设置里关闭电池优化");
+                              }
+                          }, null);
+                  addPermissionRow("勿扰访问权限", "读取勿扰状态，避免静音时漏消息",
+                          Extras.dndAllowed(this), "去授权",
+                          v -> startActivity(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)), null);
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      addPermissionRow("全屏通知", "锁屏时弹出响铃页面",
+                              Extras.canFullScreen(this), "去允许", v -> {
+                                  try {
+                                      startActivity(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                              Uri.parse("package:" + getPackageName())));
+                                  } catch (Exception e) {
+                                      toast("请到系统设置里允许全屏通知");
+                                  }
+                              }, null);
+                  } else {
+                      addPermissionRow("全屏通知", "当前系统版本默认允许", true, "", null, null);
+                  }
+                  addPermissionRow("自启动 / 后台弹出", "小米、OPPO、vivo 等机型需在厂商设置里手动允许",
+                          false, "去查看", v -> {
+                              try {
+                                  startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                          Uri.parse("package:" + getPackageName())));
+                              } catch (Exception e) {
+                                  toast("请到系统设置里查看");
+                              }
+                          }, "需手动确认");
+              }
+
+              private void addPermissionRow(String title, String desc, boolean ok,
+                                            String action, View.OnClickListener listener, String override) {
+                  LinearLayout row = card();
+                  LinearLayout head = new LinearLayout(this);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  head.setGravity(Gravity.CENTER_VERTICAL);
+
+                  TextView name = new TextView(this);
+                  name.setText(title);
+                  name.setTextColor(0xFF1F2937);
+                  name.setTextSize(15);
+                  name.setLayoutParams(new LinearLayout.LayoutParams(
+                          0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  head.addView(name);
+
+                  TextView state = new TextView(this);
+                  state.setText(override != null ? override : (ok ? "已开启" : "未开启"));
+                  state.setTextColor(override != null ? 0xFF6B7280 : (ok ? 0xFF16A34A : 0xFFDC2626));
+                  state.setTextSize(12);
+                  head.addView(state);
+                  row.addView(head);
+
+                  TextView detail = new TextView(this);
+                  detail.setText(desc);
+                  detail.setTextColor(0xFF6B7280);
+                  detail.setTextSize(12);
+                  detail.setPadding(0, dp(this, 4), 0, dp(this, 8));
+                  row.addView(detail);
+
+                  if (!ok && listener != null) {
+                      row.addView(secondaryButton(action, listener));
+                  }
+                  permissionContainer.addView(row);
               }
 
               private NumberPicker makeDayPicker() {
@@ -667,19 +749,15 @@ jobs:
               }
 
               private boolean hasNotificationAccess() {
-                  String enabled = Settings.Secure.getString(
-                          getContentResolver(), "enabled_notification_listeners");
-                  return enabled != null && enabled.contains(getPackageName());
+                  return Extras.FeishuListener.hasAccess(this);
               }
 
               private boolean isIgnoringBattery() {
-                  PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-                  return pm.isIgnoringBatteryOptimizations(getPackageName());
+                  return Extras.ignoringBattery(this);
               }
 
               private boolean isDndAllowed() {
-                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                  return nm.isNotificationPolicyAccessGranted();
+                  return Extras.dndAllowed(this);
               }
 
               private void requestNotificationPermission() {
@@ -691,11 +769,19 @@ jobs:
               }
 
               @Override
+              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+                  renderPermissionChecks();
+              }
+
+              @Override
               protected void onResume() {
                   super.onResume();
                   updateStatus();
+                  renderPermissionChecks();
                   if (ScheduleStore.isEnabled(this)) {
                       AlarmService.startGuard(this);
+                      Extras.WatchdogReceiver.schedule(this);
                   }
               }
 
@@ -1382,17 +1468,13 @@ jobs:
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
                   <activity
-                      android:name=".Extras$HomeActivity"
+                      android:name=".MainActivity"
                       android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="false" />
 
                   <activity
                       android:name=".MainActivity$AlarmActivity"
@@ -1403,13 +1485,7 @@ jobs:
                       android:turnScreenOn="true" />
 
                   <activity
-                      android:name=".Extras$PermissionCheckActivity"
-                      android:exported="false" />
-                  <activity
                       android:name=".Extras$TriggerLogActivity"
-                      android:exported="false" />
-                  <activity
-                      android:name=".Extras$ShiftPatternActivity"
                       android:exported="false" />
 
                   <service
@@ -1526,77 +1602,6 @@ jobs:
                   return Build.VERSION.SDK_INT < 33 || c.checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
               }
 
-              public static class HomeActivity extends Activity {
-                  @Override protected void onCreate(Bundle b) {
-                      super.onCreate(b);
-                      if (MainActivity.ScheduleStore.isEnabled(this)) WatchdogReceiver.schedule(this);
-                  }
-                  @Override protected void onResume() { super.onResume(); render(); }
-                  private void render() {
-                      ScrollView scroll = new ScrollView(this);
-                      LinearLayout root = new LinearLayout(this);
-                      root.setOrientation(LinearLayout.VERTICAL);
-                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
-                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
-                      root.addView(text(this, "飞书夜班铃声", 28, 0xFF1E2430));
-                      TextView sub = text(this, "夜班消息提醒 · 只在设定时间响铃", 13, 0xFF6B7280);
-                      sub.setPadding(0, dp(this, 4), 0, dp(this, 16)); root.addView(sub);
-
-                      LinearLayout statusCard = card(this);
-                      TextView status = text(this, statusText(), 13, 0xFF4B5563);
-                      status.setLineSpacing(0, 1.35f); statusCard.addView(status);
-                      CheckBox enable = new CheckBox(this);
-                      enable.setText("启用飞书响铃");
-                      enable.setTextSize(16); enable.setTextColor(0xFF1E2430);
-                      enable.setPadding(0, dp(this, 10), 0, 0);
-                      enable.setChecked(MainActivity.ScheduleStore.isEnabled(this));
-                      enable.setOnCheckedChangeListener((v, checked) -> {
-                          MainActivity.ScheduleStore.setEnabled(this, checked);
-                          if (checked) {
-                              try { MainActivity.AlarmService.startGuard(this); } catch (Exception ignored) {}
-                              WatchdogReceiver.schedule(this);
-                          } else {
-                              MainActivity.AlarmService.stopGuard(this);
-                              WatchdogReceiver.cancel(this);
-                          }
-                      });
-                      statusCard.addView(enable);
-                      root.addView(statusCard);
-
-                      LinearLayout tools = card(this);
-                      TextView title = text(this, "工具", 13, 0xFF2563EB);
-                      title.setPadding(0, dp(this, 8), 0, dp(this, 8)); tools.addView(title);
-                      Button detail = button(this, "详细设置（原来的界面）", false);
-                      detail.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class)));
-                      tools.addView(detail, params(this, false));
-                      Button perm = button(this, "权限自检", false);
-                      perm.setOnClickListener(v -> startActivity(new Intent(this, PermissionCheckActivity.class)));
-                      tools.addView(perm, params(this, false));
-                      Button log = button(this, "查看触发日志", false);
-                      log.setOnClickListener(v -> startActivity(new Intent(this, TriggerLogActivity.class)));
-                      tools.addView(log, params(this, false));
-                      Button shift = button(this, "白夜休休模板", false);
-                      shift.setOnClickListener(v -> startActivity(new Intent(this, ShiftPatternActivity.class)));
-                      tools.addView(shift, params(this, false));
-                      Button test = button(this, "测试响铃", true);
-                      test.setOnClickListener(v -> {
-                          TriggerLogStore.log(this, "测试消息", "手动测试响铃", "已响铃");
-                          MainActivity.AlarmService.trigger(this, "测试消息", "这是测试铃声");
-                      });
-                      tools.addView(test, params(this, true));
-                      root.addView(tools);
-
-                      scroll.addView(root); setContentView(scroll);
-                  }
-                  private String statusText() {
-                      return "通知使用权：" + (FeishuListener.hasAccess(this) ? "已开启" : "未开启")
-                              + "\n全屏通知：" + (canFullScreen(this) ? "已允许" : "未允许")
-                              + "\n电池优化：" + (ignoringBattery(this) ? "已忽略" : "未忽略")
-                              + "\n" + ShiftPatternStore.todayText(this)
-                              + "\n班表模板：" + (ShiftPatternStore.isEnabled(this) ? "已启用" : "未启用");
-                  }
-              }
-
               public static class FeishuListener extends android.service.notification.NotificationListenerService {
                   private static final String[] PACKAGES = {
                           "com.ss.android.lark",
@@ -1635,9 +1640,7 @@ jobs:
                       if (text == null || text.isEmpty()) text = extras.getString(Notification.EXTRA_BIG_TEXT, "收到一条飞书消息");
 
                       long now = System.currentTimeMillis();
-                      boolean active = MainActivity.ScheduleStore.isActive(this, now)
-                              || ShiftPatternStore.isActive(this, now);
-                      if (!active) {
+                      if (!MainActivity.ScheduleStore.isActive(this, now)) {
                           TriggerLogStore.log(this, title, text, "不在时段");
                           return;
                       }
@@ -1695,7 +1698,7 @@ jobs:
                       try {
                           NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
                           nm.createNotificationChannel(new NotificationChannel("feishu_watchdog", "监控异常提醒", NotificationManager.IMPORTANCE_DEFAULT));
-                          Intent open = new Intent(context, HomeActivity.class);
+                          Intent open = new Intent(context, MainActivity.class);
                           PendingIntent pi = PendingIntent.getActivity(context, 12, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
                           Notification n = new Notification.Builder(context, "feishu_watchdog")
                                   .setSmallIcon(android.R.drawable.ic_dialog_alert)
@@ -1749,52 +1752,6 @@ jobs:
                   }
               }
 
-              public static class PermissionCheckActivity extends Activity {
-                  @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
-                  @Override protected void onResume() { super.onResume(); render(); }
-                  @Override public void onRequestPermissionsResult(int code, String[] p, int[] r) { super.onRequestPermissionsResult(code, p, r); render(); }
-                  private void render() {
-                      ScrollView scroll = new ScrollView(this);
-                      LinearLayout root = new LinearLayout(this);
-                      root.setOrientation(LinearLayout.VERTICAL);
-                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
-                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
-                      root.addView(text(this, "权限自检", 26, 0xFF1E2430));
-                      TextView sub = text(this, "全部绿灯，飞书消息才不会被系统拦掉", 13, 0xFF6B7280);
-                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
-                      addRow(root, "通知使用权", "读取飞书通知的钥匙，升级后要重新勾选一次", FeishuListener.hasAccess(this), "去开启", v -> open(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)), null);
-                      addRow(root, "通知权限", "Android 13 以上要允许本 App 发通知", notificationsEnabled(this), "去开启", v -> askNotify(), null);
-                      addRow(root, "电池优化白名单", "防止系统把后台监控杀掉", ignoringBattery(this), "去设置", v -> open(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName()))), null);
-                      addRow(root, "勿扰访问权限", "读取勿扰状态，避免静音时漏消息", dndAllowed(this), "去授权", v -> open(new Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)), null);
-                      if (Build.VERSION.SDK_INT >= 34) {
-                          addRow(root, "全屏通知", "锁屏时弹出响铃页面", canFullScreen(this), "去允许", v -> open(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:" + getPackageName()))), null);
-                      } else {
-                          addRow(root, "全屏通知", "当前系统版本默认允许", true, "", null, null);
-                      }
-                      addRow(root, "自启动 / 后台弹出", "小米、OPPO、vivo 等机型需在厂商设置里手动允许", false, "去查看", v -> open(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))), "需手动确认");
-                      Button refresh = button(this, "刷新状态", true);
-                      refresh.setOnClickListener(v -> render());
-                      root.addView(refresh, params(this, true));
-                      scroll.addView(root); setContentView(scroll);
-                  }
-                  private void addRow(LinearLayout parent, String title, String desc, boolean ok, String action, View.OnClickListener listener, String override) {
-                      LinearLayout c = card(this);
-                      LinearLayout head = new LinearLayout(this); head.setOrientation(LinearLayout.HORIZONTAL); head.setGravity(Gravity.CENTER_VERTICAL);
-                      TextView t = text(this, title, 15, 0xFF1F2937); t.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1)); head.addView(t);
-                      String status = override != null ? override : (ok ? "已开启" : "未开启");
-                      int color = override != null ? 0xFF6B7280 : (ok ? 0xFF16A34A : 0xFFDC2626);
-                      head.addView(text(this, status, 12, color)); c.addView(head);
-                      TextView d = text(this, desc, 12, 0xFF6B7280); d.setPadding(0, dp(this, 4), 0, dp(this, 8)); c.addView(d);
-                      if (!ok && listener != null) { Button b = button(this, action, false); b.setOnClickListener(listener); c.addView(b, params(this, false)); }
-                      parent.addView(c);
-                  }
-                  private void askNotify() {
-                      if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 7);
-                      else { Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS); i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()); open(i); }
-                  }
-                  private void open(Intent i) { try { startActivity(i); } catch (Exception e) { Toast.makeText(this, "打不开系统设置，请手动去设置里找", Toast.LENGTH_SHORT).show(); } }
-              }
-
               public static class TriggerLogActivity extends Activity {
                   @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
                   private void render() {
@@ -1825,152 +1782,6 @@ jobs:
                       scroll.addView(root); setContentView(scroll);
                   }
                   private int resultColor(String r) { if ("已响铃".equals(r)) return 0xFFDC2626; if ("已停止".equals(r)) return 0xFF16A34A; return 0xFF6B7280; }
-              }
-
-              public static class ShiftPatternStore {
-                  private static final String KEY_ENABLED = "shift_enabled", KEY_ANCHOR = "shift_anchor", KEY_WINDOWS = "shift_windows";
-                  public static class Window { public int start, end; public boolean on; public Window(int s, int e, boolean o) { start = s; end = e; on = o; } }
-                  static SharedPreferences prefs(Context c) { return MainActivity.ScheduleStore.prefs(c); }
-                  public static boolean isEnabled(Context c) { return prefs(c).getBoolean(KEY_ENABLED, false); }
-                  public static void setEnabled(Context c, boolean v) { prefs(c).edit().putBoolean(KEY_ENABLED, v).apply(); }
-                  public static long getAnchor(Context c) { return prefs(c).getLong(KEY_ANCHOR, 0); }
-                  public static void setAnchor(Context c, long v) { prefs(c).edit().putLong(KEY_ANCHOR, v).apply(); }
-                  public static Window[] defaults() { return new Window[]{new Window(1350, 450, true), new Window(570, 1020, true), new Window(1380, 510, true)}; }
-                  public static Window[] getWindows(Context c) {
-                      Window[] w = defaults();
-                      try {
-                          JSONArray a = new JSONArray(prefs(c).getString(KEY_WINDOWS, "[]"));
-                          for (int i = 0; i < 3 && i < a.length(); i++) {
-                              JSONObject o = a.getJSONObject(i);
-                              w[i].start = o.optInt("start", w[i].start); w[i].end = o.optInt("end", w[i].end); w[i].on = o.optBoolean("on", w[i].on);
-                          }
-                      } catch (Exception ignored) {}
-                      return w;
-                  }
-                  public static void saveWindow(Context c, int index, int start, int end, boolean on) {
-                      Window[] w = getWindows(c); w[index].start = start; w[index].end = end; w[index].on = on;
-                      JSONArray a = new JSONArray();
-                      for (Window x : w) {
-                          try { JSONObject o = new JSONObject(); o.put("start", x.start); o.put("end", x.end); o.put("on", x.on); a.put(o); } catch (Exception ignored) {}
-                      }
-                      prefs(c).edit().putString(KEY_WINDOWS, a.toString()).apply();
-                  }
-                  public static int phaseNow(Context c) { return phaseAt(c, System.currentTimeMillis()); }
-                  public static int phaseAt(Context c, long t) { long a = getAnchor(c); return a == 0 ? -1 : (int) Math.floorMod(days(a, t), 4L); }
-                  private static long days(long a, long b) {
-                      Calendar ca = Calendar.getInstance(); ca.setTimeInMillis(a); zero(ca);
-                      Calendar cb = Calendar.getInstance(); cb.setTimeInMillis(b); zero(cb);
-                      return (cb.getTimeInMillis() - ca.getTimeInMillis()) / 86400000L;
-                  }
-                  private static void zero(Calendar c) { c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0); }
-                  public static String phaseName(int p) { return p == 0 ? "白班" : p == 1 ? "夜班" : "休息"; }
-                  public static String todayText(Context c) { int p = phaseNow(c); return p < 0 ? "未设置锚点日期" : "今天：" + phaseName(p) + "（第" + (p + 1) + "天）"; }
-                  public static boolean isActive(Context c, long now) {
-                      if (!isEnabled(c) || getAnchor(c) == 0) return false;
-                      long d = days(getAnchor(c), now);
-                      int today = (int) Math.floorMod(d, 4L), yesterday = (int) Math.floorMod(d - 1L, 4L);
-                      Window[] w = getWindows(c);
-                      Window tw = w[today == 0 ? 0 : today == 1 ? 1 : 2], yw = w[yesterday == 0 ? 0 : yesterday == 1 ? 1 : 2];
-                      Calendar cal = Calendar.getInstance(); cal.setTimeInMillis(now);
-                      int m = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
-                      if (tw.on) {
-                          if (tw.start == tw.end) return true;
-                          if (tw.start < tw.end) { if (m >= tw.start && m < tw.end) return true; }
-                          else if (m >= tw.start) return true;
-                      }
-                      return yw.on && yw.start > yw.end && m < yw.end;
-                  }
-                  public static String windowText(Window w) { return time(w.start) + " - " + (w.end < w.start ? "次日 " : "") + time(w.end); }
-                  public static String time(int m) { return String.format(Locale.CHINA, "%02d:%02d", m / 60, m % 60); }
-              }
-
-              public static class ShiftPatternActivity extends Activity {
-                  @Override protected void onCreate(Bundle b) { super.onCreate(b); render(); }
-                  @Override protected void onResume() { super.onResume(); render(); }
-                  private void render() {
-                      ScrollView scroll = new ScrollView(this);
-                      LinearLayout root = new LinearLayout(this);
-                      root.setOrientation(LinearLayout.VERTICAL);
-                      root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 32));
-                      root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR, new int[]{0xFFF9FBFF, 0xFFEAF1FB, 0xFFF5F7FC}));
-                      root.addView(text(this, "白夜休休模板", 26, 0xFF1E2430));
-                      TextView sub = text(this, "以锚点日期为第1天，按 白班 → 夜班 → 休 → 休 四天循环", 13, 0xFF6B7280);
-                      sub.setPadding(0, dp(this, 4), 0, dp(this, 14)); root.addView(sub);
-
-                      CheckBox enable = new CheckBox(this);
-                      enable.setText("启用班表模板"); enable.setTextSize(16); enable.setTextColor(0xFF1E2430);
-                      enable.setChecked(ShiftPatternStore.isEnabled(this));
-                      enable.setOnCheckedChangeListener((v, checked) -> {
-                          ShiftPatternStore.setEnabled(this, checked);
-                          if (checked && ShiftPatternStore.getAnchor(this) == 0) {
-                              Calendar c = Calendar.getInstance(); c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0);
-                              ShiftPatternStore.setAnchor(this, c.getTimeInMillis());
-                          }
-                          render();
-                      });
-                      root.addView(enable);
-
-                      long anchor = ShiftPatternStore.getAnchor(this);
-                      String anchorText = anchor == 0 ? "设置锚点日期（选你最近一次白班）" : "锚点日期：" + new SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).format(new Date(anchor)) + "（第1天·白班）";
-                      Button anchorBtn = button(this, anchorText, false);
-                      anchorBtn.setOnClickListener(v -> pickAnchor());
-                      root.addView(anchorBtn, params(this, false));
-
-                      TextView status = text(this, ShiftPatternStore.todayText(this) + (ShiftPatternStore.isActive(this, System.currentTimeMillis()) ? " · 当前监控中" : " · 当前不在时段"), 13, 0xFF2563EB);
-                      status.setPadding(0, dp(this, 10), 0, dp(this, 8)); root.addView(status);
-
-                      String[] names = {"白班监控", "夜班监控", "休息监控"};
-                      ShiftPatternStore.Window[] ws = ShiftPatternStore.getWindows(this);
-                      for (int i = 0; i < 3; i++) {
-                          final int index = i;
-                          LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL);
-                          CheckBox box = new CheckBox(this);
-                          box.setText(names[i] + "\n" + ShiftPatternStore.windowText(ws[i]));
-                          box.setTextSize(13); box.setTextColor(0xFF1F2937); box.setChecked(ws[i].on);
-                          box.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-                          box.setOnCheckedChangeListener((v, checked) -> { ws[index].on = checked; ShiftPatternStore.saveWindow(this, index, ws[index].start, ws[index].end, checked); });
-                          row.addView(box);
-                          Button edit = button(this, "修改", false);
-                          edit.setLayoutParams(new LinearLayout.LayoutParams(dp(this, 72), dp(this, 40)));
-                          edit.setOnClickListener(v -> editWindow(index, ws[index]));
-                          row.addView(edit); root.addView(row);
-                      }
-
-                      Button back = button(this, "返回", false);
-                      back.setOnClickListener(v -> finish());
-                      root.addView(back, params(this, false));
-                      scroll.addView(root); setContentView(scroll);
-                  }
-
-                  private void editWindow(int index, ShiftPatternStore.Window w) {
-                      LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(this, 16), dp(this, 8), dp(this, 16), dp(this, 8));
-                      box.addView(text(this, "开始", 14, Color.DKGRAY));
-                      LinearLayout row1 = new LinearLayout(this); row1.setOrientation(LinearLayout.HORIZONTAL);
-                      NumberPicker sh = num(0, 23, w.start / 60), sm = num(0, 59, w.start % 60);
-                      row1.addView(sh, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); row1.addView(sm, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); box.addView(row1);
-                      TextView end = text(this, "结束", 14, Color.DKGRAY); end.setPadding(0, dp(this, 8), 0, 0); box.addView(end);
-                      LinearLayout row2 = new LinearLayout(this); row2.setOrientation(LinearLayout.HORIZONTAL);
-                      NumberPicker eh = num(0, 23, w.end / 60), em = num(0, 59, w.end % 60);
-                      row2.addView(eh, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); row2.addView(em, new LinearLayout.LayoutParams(0, dp(this, 140), 1)); box.addView(row2);
-                      TextView tip = text(this, "结束早于开始会自动按跨天处理", 12, Color.GRAY); tip.setPadding(0, dp(this, 6), 0, 0); box.addView(tip);
-                      new AlertDialog.Builder(this).setTitle("修改监控时段").setView(box)
-                              .setPositiveButton("保存", (d, which) -> {
-                                  ShiftPatternStore.saveWindow(this, index, sh.getValue() * 60 + sm.getValue(), eh.getValue() * 60 + em.getValue(), w.on);
-                                  render();
-                              }).setNegativeButton("取消", null).show();
-                  }
-
-                  private NumberPicker num(int min, int max, int value) {
-                      NumberPicker p = new NumberPicker(this); p.setMinValue(min); p.setMaxValue(max); p.setValue(value); p.setWrapSelectorWheel(true); return p;
-                  }
-
-                  private void pickAnchor() {
-                      Calendar c = Calendar.getInstance(); long a = ShiftPatternStore.getAnchor(this); if (a > 0) c.setTimeInMillis(a);
-                      new DatePickerDialog(this, (view, year, month, day) -> {
-                          Calendar n = Calendar.getInstance(); n.set(year, month, day, 0, 0, 0); n.set(Calendar.MILLISECOND, 0);
-                          ShiftPatternStore.setAnchor(this, n.getTimeInMillis()); render();
-                      }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show();
-                  }
               }
           }
           EOF
